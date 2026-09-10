@@ -1,0 +1,9 @@
+$env:ENABLE_PROMPT_CACHING_1H="1"
+claude
+
+5-minute cache: Costs 1.25x the normal input token price.
+1-hour cache: Costs 2.0x the normal input token price.  
+Reading the cache (Hits): Costs only 0.1x the normal price.  
+
+Type /compact into Claude Code and press Enter. 
+Claude will summarize everything you've done so far, discard the raw chat history, and create a fresh, tightly optimized cache checkpoint.
