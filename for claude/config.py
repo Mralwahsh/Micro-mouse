@@ -11,6 +11,12 @@ CELL_SIZE_CM = 18.0
 WALL_THICKNESS_CM = 1.2
 PX_PER_CM = CELL_SIZE / CELL_SIZE_CM        # rendering scale ≈ 1.667 px/cm
 
+# Movement helpers (shared by maze.py and micromouse.py)
+DIRECTIONS = {'N': (0, -1), 'S': (0, 1), 'E': (1, 0), 'W': (-1, 0)}
+OPPOSITE = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
+TARGET_CELLS = {(4, 4), (5, 4), (4, 5), (5, 5)}
+START_CELL = (0, ROWS - 1)
+
 # Pixel Dimensions
 MAZE_PIXEL_WIDTH = (COLS * CELL_SIZE) + ((COLS + 1) * WALL_THICKNESS)
 MAZE_PIXEL_HEIGHT = (ROWS * CELL_SIZE) + ((ROWS + 1) * WALL_THICKNESS)
