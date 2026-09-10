@@ -25,8 +25,9 @@ class DashboardApp:
         self.physical_maze = Maze(is_blank_memory=False)
         self.mouse = Micromouse()
         self.absolute_shortest_path = self.physical_maze.get_shortest_path(0, 9)
+        self.least_turn_path = self.physical_maze.get_least_turn_path(0, 9)
 
-    def draw_maze_panel(self, offset_x, offset_y, title_text, maze_obj, is_memory=False, show_trail=False, path_to_draw=None, wall_color=COLOR_WALL_RED):
+    def draw_maze_panel(self, offset_x, offset_y, title_text, maze_obj, is_memory=False, show_trail=False, path_to_draw=None, wall_color=COLOR_WALL_RED, secondary_path=None):
         title_surf = self.font_bold.render(title_text, True, (255, 255, 255))
         self.screen.blit(title_surf, (offset_x, offset_y - 25))
         
@@ -74,15 +75,21 @@ class DashboardApp:
                         if cell.walls['W']: pygame.draw.line(self.screen, (255,255,255), (px, py), (px, py+CELL_SIZE), 1)
                         if cell.walls['E']: pygame.draw.line(self.screen, (255,255,255), (px+CELL_SIZE, py), (px+CELL_SIZE, py+CELL_SIZE), 1)
 
-        if path_to_draw:
-            for i in range(len(path_to_draw) - 1):
-                x1, y1 = path_to_draw[i]
-                x2, y2 = path_to_draw[i+1]
+        def _draw_path(path, color, width):
+            for i in range(len(path) - 1):
+                x1, y1 = path[i]
+                x2, y2 = path[i+1]
                 start_px = offset_x + WALL_THICKNESS + (x1 * (CELL_SIZE + WALL_THICKNESS)) + CELL_SIZE // 2
                 start_py = offset_y + WALL_THICKNESS + (y1 * (CELL_SIZE + WALL_THICKNESS)) + CELL_SIZE // 2
                 end_px = offset_x + WALL_THICKNESS + (x2 * (CELL_SIZE + WALL_THICKNESS)) + CELL_SIZE // 2
                 end_py = offset_y + WALL_THICKNESS + (y2 * (CELL_SIZE + WALL_THICKNESS)) + CELL_SIZE // 2
-                pygame.draw.line(self.screen, COLOR_SOLUTION, (start_px, start_py), (end_px, end_py), 3)
+                pygame.draw.line(self.screen, color, (start_px, start_py), (end_px, end_py), width)
+
+        # least-turn path drawn thicker underneath so both stay visible where they overlap
+        if secondary_path:
+            _draw_path(secondary_path, COLOR_LEAST_TURN, 6)
+        if path_to_draw:
+            _draw_path(path_to_draw, COLOR_SOLUTION, 3)
 
     def draw_centered_text(self, text, center_x, y, color=COLOR_TEXT_METRIC):
         surf = self.font_small.render(text, True, color)
@@ -167,9 +174,12 @@ class DashboardApp:
             self.draw_maze_panel(offset_3, 50, "Current Best Path", self.mouse.memory, is_memory=True, path_to_draw=solution_path)
             self.draw_centered_text(f"Round 3 Steps: {self.mouse.round_steps[2]}", center_3, text_y_pos)
 
-            self.draw_maze_panel(offset_4, 50, "Absolute Shortest Path", self.physical_maze, is_memory=False, path_to_draw=self.absolute_shortest_path, wall_color=COLOR_WALL_BLUE)
+            self.draw_maze_panel(offset_4, 50, "Absolute Shortest Path", self.physical_maze, is_memory=False, path_to_draw=self.absolute_shortest_path, wall_color=COLOR_WALL_BLUE, secondary_path=self.least_turn_path)
             perfect_len = len(self.absolute_shortest_path) if self.absolute_shortest_path else 0
             self.draw_centered_text(f"Absolute Shortest Path: {perfect_len} steps", center_4, text_y_pos)
+            lt_len = len(self.least_turn_path) if self.least_turn_path else 0
+            lt_turns = Maze.count_turns(self.least_turn_path)
+            self.draw_centered_text(f"Least-Turn Path: {lt_len} steps / {lt_turns} turns", center_4, text_y_pos + 16, color=COLOR_LEAST_TURN)
 
             self.draw_mouse_tokens(offset_1, offset_2)
             self.draw_ui()

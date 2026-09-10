@@ -21,10 +21,10 @@ class Micromouse:
     Discovering a wall changes the flood grid on the next tick, so the mouse
     re-routes automatically - there is no explicit backtracking stack.
 
-    Rounds: each round is a fresh run from the start. Knowledge (the memory map)
-    carries over, so every round the route tightens. The search stops early once
-    the best *confirmed* route is as short as the *optimistic* lower bound - at
-    that point the path is provably optimal and more exploration cannot help.
+    Rounds: the mouse always runs the full 3 rounds. Each round is a fresh run
+    from the start; the memory map carries over, so every round the route
+    tightens. `solved_optimally` is reported once the confirmed best route
+    matches the optimistic lower bound (further rounds cannot improve it).
     """
 
     def __init__(self):
@@ -161,13 +161,17 @@ class Micromouse:
 
     # ------------------------------------------------------------ round end
     def _finish_round(self):
+        # solved_optimally stays as an *informational* flag (shown in telemetry):
+        # the confirmed best route is already as short as the optimistic lower
+        # bound, so later rounds cannot improve it. We no longer stop early on
+        # it - every run always plays out the full 3 rounds.
         confirmed = self._flood(optimistic=False)
         optimistic = self._flood(optimistic=True)
         sx, sy = self.start
         if confirmed[sx][sy] is not None and confirmed[sx][sy] == optimistic[sx][sy]:
             self.solved_optimally = True
 
-        if self.current_round < self.max_rounds and not self.solved_optimally:
+        if self.current_round < self.max_rounds:
             self.state = "ROUND_PAUSED"
         else:
             self.state = "DONE"
