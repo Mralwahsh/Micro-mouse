@@ -80,7 +80,8 @@ This simulator is step one of a larger plan:
 - [pygame-ce](https://pyga.me/)
 
 ## 👤 Author
-Developed by **Mralwahsh** as part of advanced robotics and embedded systems engineering.
+
+Developed by **Mralwahsh** 
 
 ## License
 
