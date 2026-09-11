@@ -79,6 +79,10 @@ This simulator is step one of a larger plan:
 - Python 3.10+
 - [pygame-ce](https://pyga.me/)
 
+## 👤 Author
+
+Developed by **Mralwahsh** 
+
 ## License
 
 Not yet specified.
