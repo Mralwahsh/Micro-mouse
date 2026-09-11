@@ -79,6 +79,9 @@ This simulator is step one of a larger plan:
 - Python 3.10+
 - [pygame-ce](https://pyga.me/)
 
+## 👤 Author
+Developed by **Mralwahsh** as part of advanced robotics and embedded systems engineering.
+
 ## License
 
 Not yet specified.
