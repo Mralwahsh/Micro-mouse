@@ -52,32 +52,48 @@ class SensorArray:
     y downwards. Cell (x, y) spans [18x, 18x+18] between post centres; walls and
     posts are WALL_THICKNESS_CM thick and centred on the grid lines.
     """
-    def __init__(self, maze):
+    def __init__(self, maze, known_only=False):
+        """known_only: build from a MEMORY maze, using only walls confirmed to be there
+        (the firmware's own view of the world, for predicting what a sensor should read)."""
         self.maze = maze
-        boxes = []
+        boxes, kinds = [], []
         for i in range(COLS + 1):
             for j in range(ROWS + 1):
                 if i == COLS // 2 and j == ROWS // 2:      # no post in the middle of the goal room
                     continue
                 gx, gy = i * CELL_SIZE_CM, j * CELL_SIZE_CM
                 boxes.append((gx - HALF_WALL, gy - HALF_WALL, gx + HALF_WALL, gy + HALF_WALL))
+                kinds.append('post')
         for x in range(COLS):
             for y in range(ROWS):
-                walls, gx, gy = maze.grid[x][y].walls, x * CELL_SIZE_CM, y * CELL_SIZE_CM
-                if walls['N']:
+                cell, gx, gy = maze.grid[x][y], x * CELL_SIZE_CM, y * CELL_SIZE_CM
+
+                def closed(d):
+                    return cell.walls[d] and (cell.walls_known[d] or not known_only)
+                if closed('N'):
                     boxes.append((gx + HALF_WALL, gy - HALF_WALL, gx + CELL_SIZE_CM - HALF_WALL, gy + HALF_WALL))
-                if walls['W']:
+                    kinds.append('H')
+                if closed('W'):
                     boxes.append((gx - HALF_WALL, gy + HALF_WALL, gx + HALF_WALL, gy + CELL_SIZE_CM - HALF_WALL))
-                if y == ROWS - 1 and walls['S']:
+                    kinds.append('V')
+                if y == ROWS - 1 and closed('S'):
                     boxes.append((gx + HALF_WALL, gy + CELL_SIZE_CM - HALF_WALL,
                                   gx + CELL_SIZE_CM - HALF_WALL, gy + CELL_SIZE_CM + HALF_WALL))
-                if x == COLS - 1 and walls['E']:
+                    kinds.append('H')
+                if x == COLS - 1 and closed('E'):
                     boxes.append((gx + CELL_SIZE_CM - HALF_WALL, gy + HALF_WALL,
                                   gx + CELL_SIZE_CM + HALF_WALL, gy + CELL_SIZE_CM - HALF_WALL))
+                    kinds.append('V')
         self.boxes = np.array(boxes, dtype=float)       # (N, 4): xmin, ymin, xmax, ymax
+        self.kinds = kinds                              # 'post', 'H' (horizontal wall) or 'V' (vertical wall)
 
     def true_distance(self, ox, oy, dx, dy, max_range):
         """Exact distance to the first solid surface along the beam (None = nothing in range)."""
+        hit = self.first_hit(ox, oy, dx, dy, max_range)
+        return None if hit is None else hit[0]
+
+    def first_hit(self, ox, oy, dx, dy, max_range):
+        """(distance, kind) of the first surface along the beam, or None if nothing is in range."""
         b = self.boxes
         near, far = [], []
         for o, d, lo, hi in ((ox, dx, b[:, 0], b[:, 2]), (oy, dy, b[:, 1], b[:, 3])):
@@ -94,7 +110,9 @@ class SensorArray:
         hits = (t_near <= t_far) & (t_far >= 0) & (t_near <= max_range)
         if not hits.any():
             return None
-        return float(max(0.0, t_near[hits].min()))
+        t = np.where(hits, t_near, np.inf)
+        i = int(np.argmin(t))
+        return float(max(0.0, t[i])), self.kinds[i]
 
     def scan(self, px, py, theta, rng=random):
         """Read every sensor from the pose (px, py, theta). Distances carry sensor noise."""

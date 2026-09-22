@@ -3,7 +3,7 @@ import math
 import pygame
 import sys
 from config import *
-from maze import Maze
+from maze import Maze, START_OPENING
 from micromouse import Micromouse
 from sensors import body_to_world
 
@@ -34,7 +34,7 @@ TOGGLES = [
     ("flood",      "Flood Values",    (200, 200, 200)),
     ("mouse",      "Mouse Position",  COLOR_PHYSICAL_MOUSE),
     ("rays",       "Sensor Rays",     (255, 110, 110)),
-    ("trail",      "Real Path",       (0, 220, 220)),
+    ("trail",      "Speed Path",      (255, 200, 0)),
 ]
 TOGGLES_ON_AT_START = {"mouse", "trail"}   # show the REAL robot and how it weaves by default
 TOGGLE_ROWS = (len(TOGGLES) + TOGGLE_COLS - 1) // TOGGLE_COLS
@@ -49,6 +49,12 @@ COLOR_TOGGLE_OFF = (70, 70, 70)
 COLOR_MEMORY_WALL = (230, 230, 230)
 COLOR_POST_DIM = (90, 90, 90)
 COLOR_SENSOR = {"IR": (255, 190, 40), "TOF": (255, 110, 110)}
+
+
+def speed_color(v):
+    """Red (stopped) -> yellow (half speed) -> green (top speed)."""
+    t = max(0.0, min(1.0, v / MAX_SPEED_CM_S))
+    return (int(255 * min(1.0, 2 * (1 - t))), int(255 * min(1.0, 2 * t)), 0)
 
 
 class DashboardApp:
@@ -97,6 +103,15 @@ class DashboardApp:
         if walls['S']: pygame.draw.rect(self.screen, color, (r.x, r.bottom, CELL_SIZE, WALL_THICKNESS))
         if walls['W']: pygame.draw.rect(self.screen, color, (r.x - WALL_THICKNESS, r.y, WALL_THICKNESS, CELL_SIZE))
         if walls['E']: pygame.draw.rect(self.screen, color, (r.right, r.y, WALL_THICKNESS, CELL_SIZE))
+
+    def draw_line_on_wall(self, ox, oy, key, color):
+        """Paint a (missing) wall slot, e.g. the start / finish line, given its wall key."""
+        kind, a, b = key
+        if kind == 'H':
+            rect = (ox + WALL_THICKNESS + a * PITCH, oy + b * PITCH, CELL_SIZE, WALL_THICKNESS)
+        else:
+            rect = (ox + a * PITCH, oy + WALL_THICKNESS + b * PITCH, WALL_THICKNESS, CELL_SIZE)
+        pygame.draw.rect(self.screen, color, rect)
 
     def draw_posts(self, ox, oy, color):
         for i in range(COLS + 1):
@@ -169,6 +184,11 @@ class DashboardApp:
             for y in range(ROWS):
                 self.draw_cell_walls(ox, oy, x, y, self.physical_maze.grid[x][y].walls, COLOR_WALL_RED)
 
+        # official timing lines (rule 6.1.f): start = leaving the start cell, finish = goal entrance
+        sx, sy = START_CELL
+        self.draw_line_on_wall(ox, oy, Maze.edge_key(sx, sy, START_OPENING), (0, 230, 120))
+        self.draw_line_on_wall(ox, oy, self.physical_maze.goal_entrance, (255, 200, 0))
+
         if self.toggles["flood"]:
             for x in range(COLS):
                 for y in range(ROWS):
@@ -185,9 +205,11 @@ class DashboardApp:
         if self.toggles["shortest"]:
             self.draw_path(ox, oy, self.absolute_shortest_path, COLOR_SOLUTION, 3)
         m = self.mouse
-        if self.toggles["trail"] and len(m.true_trail) > 1:
-            pts = [self.world_to_px(ox, oy, x, y) for x, y in m.true_trail + [(m.body.px, m.body.py)]]
-            pygame.draw.lines(self.screen, (0, 220, 220), False, pts, 1)
+        if self.toggles["trail"]:
+            # the real path, coloured by speed: red = slow, yellow = half speed, green = top speed
+            for (x1, y1, _), (x2, y2, v) in zip(m.true_trail, m.true_trail[1:]):
+                pygame.draw.line(self.screen, speed_color(v), self.world_to_px(ox, oy, x1, y1),
+                                 self.world_to_px(ox, oy, x2, y2), 3)
         crashed = m.round_modes[m.current_round - 1] == "CRASH"
         if self.toggles["mouse"] or self.toggles["rays"] or crashed:
             b = m.body                                            # where the robot REALLY is
@@ -301,7 +323,16 @@ class DashboardApp:
         text_surf = self.font_btn.render(btn_text, True, (255, 255, 255))
         self.screen.blit(text_surf, text_surf.get_rect(center=self.explore_btn.center))
 
-        phys_cm = COLS * CELL_SIZE_CM + (COLS + 1) * WALL_THICKNESS_CM
+        if self.toggles["trail"]:                          # colour key for the speed path
+            x0, y0, w = PANEL_1_X, CONTROLS_Y + 8, 150
+            for i in range(w):
+                pygame.draw.line(self.screen, speed_color(MAX_SPEED_CM_S * i / (w - 1)),
+                                 (x0 + i, y0), (x0 + i, y0 + 10))
+            self.screen.blit(self.font_toggle.render("slow", True, (200, 200, 200)), (x0, y0 + 14))
+            fast = self.font_toggle.render(f"{MAX_SPEED_CM_S:.0f} cm/s", True, (200, 200, 200))
+            self.screen.blit(fast, fast.get_rect(topright=(x0 + w, y0 + 14)))
+
+        phys_cm = COLS * CELL_INSIDE_CM + (COLS + 1) * WALL_THICKNESS_CM
         dim_surf = self.font_small.render(f"Physical Dimensions: {phys_cm:.1f}cm x {phys_cm:.1f}cm", True, (180, 180, 180))
         self.screen.blit(dim_surf, dim_surf.get_rect(center=(MAZES_CENTER_X, APP_HEIGHT - 20)))
 

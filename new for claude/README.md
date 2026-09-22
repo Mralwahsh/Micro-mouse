@@ -37,9 +37,14 @@ Finding a wall where the mouse expected open space updates the flood grid on the
 
 ## Maze generation
 
-Each physical maze is generated with **randomized Prim's algorithm** (perfect maze, one unique path between any two cells), then:
-- The center 2×2 goal room is carved out with exactly one entrance, chosen randomly from its 8 possible walls.
-- 15 random extra walls are knocked down afterward to add loops and dead-end alternatives, so the maze isn't a single deterministic tree — closer to a real IEEE competition maze.
+Every physical maze follows the **MMRC26 maze rules** (section 5 of the official rulebook). It is carved with **randomized Prim's algorithm** and then shaped by the rules:
+- 10×10 cells, each **18 cm inside the walls** (19.2 cm post-to-post with 1.2 cm walls), with the outer wall closed all round.
+- The start cell (bottom-left corner) is walled on three sides and opens only to the next cell clockwise (north). The **start line** is drawn in green and the **finish line** (the goal entrance) in gold.
+- The 2×2 goal has exactly one entrance and is an **island**: none of its walls touch any other wall, so a wall-hugging mouse can never reach it.
+- At least one wall is attached to every post.
+- A few extra walls are knocked out (`MAZE_EXTRA_OPENINGS`) so there are several routes to the goal.
+
+`Maze.rule_violations()` checks every rule, including running a left-hand and a right-hand wall follower, and the generator retries until a maze passes.
 
 ## Project layout
 
@@ -51,7 +56,7 @@ micromouse.py  The mouse AI: sense → flood-fill → step, round/memory managem
 main.py        Pygame DashboardApp — the 4-panel UI, input handling, render loop
 ```
 
-All dimensions are derived from two real-world constants in `config.py` (`CELL_SIZE_CM = 18.0`, `WALL_THICKNESS_CM = 1.2` — the IEEE standard), so the rendering scale can change without ever losing the real-world geometry. This is also the single source of truth the future physics/RL environment will read from.
+All dimensions are derived from real-world constants in `config.py` (`CELL_INSIDE_CM = 18.0`, `WALL_THICKNESS_CM = 1.2`, giving `CELL_SIZE_CM = 19.2` post-to-post, per the MMRC26 rulebook), so the rendering scale can change without ever losing the real-world geometry. This is also the single source of truth the future physics/RL environment will read from.
 
 ## Running it
 

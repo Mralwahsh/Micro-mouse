@@ -3,7 +3,7 @@ import math
 from collections import deque
 from config import (COLS, ROWS, CELL_SIZE_CM, WALL_THICKNESS_CM, DIRECTIONS, OPPOSITE,
                     TOF_NOISE_CM, TOF_NOISE_FRAC, IR_NOISE_CM,
-                    WALL_EVIDENCE_THRESHOLD, WALL_EVIDENCE_MAX)
+                    WALL_EVIDENCE_THRESHOLD, OPEN_EVIDENCE_THRESHOLD, WALL_EVIDENCE_MAX, DRIVEN_VOTE)
 
 HALF_WALL = WALL_THICKNESS_CM / 2
 POST_MARGIN = HALF_WALL + 1.5      # readings this close to a post are ambiguous and ignored
@@ -18,8 +18,9 @@ class Mapper:
     Every edge (wall slot) carries an evidence score:
       * a beam that ENDS on a wall slot votes "wall"  (+1)
       * a beam that PASSES a wall slot votes "open"   (-1)
-      * driving through an edge proves it is open     (saturates to -MAX)
-    An edge only becomes known once |score| reaches WALL_EVIDENCE_THRESHOLD,
+      * driving through an edge is strong evidence it is open (-DRIVEN_VOTE)
+    An edge becomes a known wall at +WALL_EVIDENCE_THRESHOLD and known open only at the
+    stricter -OPEN_EVIDENCE_THRESHOLD,
     so a single noisy reading can never put a wall in (or take one out of) the map.
 
     Edge keys: ('H', x, j) = horizontal slot on grid line y = j above cell column x,
@@ -59,7 +60,7 @@ class Mapper:
     def _sync(self, key):
         """Mirror an edge's score into the memory Maze (both cells). Returns True if it changed."""
         s = self.score.get(key, 0)
-        known = abs(s) >= WALL_EVIDENCE_THRESHOLD
+        known = s >= WALL_EVIDENCE_THRESHOLD or s <= -OPEN_EVIDENCE_THRESHOLD
         closed = s > 0 if known else True          # unknown edges stay "closed" in memory, as before
         x, y, d = self._cell_edge(key)
         cell = self.memory.grid[x][y]
@@ -82,7 +83,7 @@ class Mapper:
 
     def mark_driven(self, x, y, d):
         """The mouse physically drove through this edge: it is certainly open."""
-        return self._vote(self.edge_key(x, y, d), -2 * WALL_EVIDENCE_MAX)
+        return self._vote(self.edge_key(x, y, d), -DRIVEN_VOTE)
 
     # ---------------------------------------------------------- sensor input
     def add_reading(self, r):

@@ -3,16 +3,17 @@ import math
 
 # Grid Dimensions
 COLS, ROWS = 10, 10
-CELL_SIZE = 50                 # 18.0 cm  (IEEE standard cell pitch)
-WALL_THICKNESS = 3             # 1.2 cm  (IEEE standard wall thickness)
+CELL_SIZE = 50                 # 18.0 cm  (inside of a cell, MMRC26 rule 5.a)
+WALL_THICKNESS = 3             # 1.2 cm  (post / wall thickness, rule 2.2.b)
 PADDING = 30
 
 # Real-world dimensions (single source of truth for the future physics / RL environment)
-CELL_SIZE_CM = 18.0
+CELL_INSIDE_CM = 18.0                       # MMRC26: a cell is 18 x 18 cm measured INSIDE the walls
 WALL_THICKNESS_CM = 1.2
+CELL_SIZE_CM = CELL_INSIDE_CM + WALL_THICKNESS_CM   # post-to-post pitch (19.2 cm) - what the geometry uses
 MOUSE_WIDTH_CM = 8.0                        # side to side
 MOUSE_LENGTH_CM = 10.0                      # front to back (along the heading)
-PX_PER_CM = CELL_SIZE / CELL_SIZE_CM        # rendering scale ≈ 2.778 px/cm
+PX_PER_CM = CELL_SIZE / CELL_INSIDE_CM      # rendering scale ≈ 2.778 px/cm
 
 # Sensor layout, in the mouse body frame (cm, origin = body centre):
 #   x = to the right of centre, y = forward of centre,
@@ -35,7 +36,11 @@ IR_NOISE_CM = 0.1
 SENSOR_DROPOUT = 0.005                  # chance a reading comes back as "out of range" anyway
 
 # Mapping: walls are decided by accumulated evidence, not a single reading
-WALL_EVIDENCE_THRESHOLD = 3             # net votes needed before an edge counts as known
+WALL_EVIDENCE_THRESHOLD = 3             # net votes needed before an edge counts as a known WALL
+OPEN_EVIDENCE_THRESHOLD = 8             # ... and as known OPEN: stricter, driving into a wall is far
+                                        # worse than stopping to look once more
+DRIVEN_VOTE = 8                         # "I drove through it" is strong evidence of open - but the pose
+                                        # may be wrong, so it can't erase strong wall evidence
 WALL_EVIDENCE_MAX = 10                  # votes saturate here so the map can still correct itself
 
 # Drive train: two wheels on the centre line of the body (so the mouse turns on the spot)
@@ -44,7 +49,20 @@ MOTOR_MAX_RPM = 381                     # wheel rpm after the gearbox
 WHEEL_TRACK_CM = 7.0                    # distance between the two wheels (assumed - measure yours)
 MAX_SPEED_CM_S = math.pi * WHEEL_DIAMETER_CM * MOTOR_MAX_RPM / 60    # ≈ 67.8 cm/s
 ACCEL_CM_S2 = 200.0                     # max wheel acceleration (assumed - tune to your motors)
-SEARCH_SPEED_CM_S = 40.0                # slower while exploring so the sensors have time to map
+SEARCH_SPEED_CM_S = MAX_SPEED_CM_S      # search at full motor speed (381 rpm) through mapped cells ...
+EXPLORE_SPEED_CM_S = 40.0               # ... but slow to this entering unexplored cells, so the sensors
+                                        # can confirm the walls before the mouse must commit to a move
+# Smooth 90-degree turns: a quarter circle through the corner cell, from the middle of the edge
+# it enters by to the middle of the edge it leaves by (radius = half a cell). The outer wheel
+# runs (1 + track / 2r) times faster than the mouse, so with 381 rpm motors the limit is ~50 cm/s.
+TURN_RADIUS_CM = 9.6                    # = CELL_SIZE_CM / 2
+# fastest corner the motors allow: the OUTER wheel at 381 rpm (~49.7 cm/s, 0.26 g sideways)
+CORNER_SPEED_CM_S = MAX_SPEED_CM_S / (1 + WHEEL_TRACK_CM / (2 * TURN_RADIUS_CM))
+SEARCH_TURN_SPEED_CM_S = CORNER_SPEED_CM_S
+FAST_TURN_SPEED_CM_S = CORNER_SPEED_CM_S
+MOTOR_LAG_COMP_S = 0.03                 # firmware: measured motor response time; corners start/end this early
+ARC_K_RADIUS = 0.4                      # rad/s of extra turn per cm off the ideal arc
+ARC_K_HEADING = 8.0                     # rad/s per rad off the arc's tangent
 # Turning on the spot spins the wheels in opposite directions, so the same wheel limits apply
 MAX_TURN_RAD_S = 2 * MAX_SPEED_CM_S / WHEEL_TRACK_CM
 TURN_ACCEL_RAD_S2 = 2 * ACCEL_CM_S2 / WHEEL_TRACK_CM
@@ -59,8 +77,8 @@ SENSOR_LATENCY_S = 0.02                 # a TOF reading describes where the body
 
 # Centering (firmware, encoders only - no IMU): an observer estimates offset, heading error and
 # the robot's own wheel-mismatch curve from the steering it commands + the side-wall distances
-CENTER_KP = 0.9                         # rad/s of steering per cm off-centre
-CENTER_KH = 9.0                         # rad/s of steering per rad of heading error
+CENTER_KP = 1.2                         # rad/s of steering per cm off-centre (tuned for 381 rpm straights)
+CENTER_KH = 14.0                        # rad/s of steering per rad of heading error
 MAX_STEER_RAD_S = 2.0
 OBS_K_OFFSET = 0.3                      # observer gains, applied per side-wall reading
 OBS_K_HEADING = 0.02                    # rad per cm of reading error
@@ -75,7 +93,8 @@ DEFAULT_SIM_SPEED = 1
 DIRECTIONS = {'N': (0, -1), 'S': (0, 1), 'E': (1, 0), 'W': (-1, 0)}
 OPPOSITE = {'N': 'S', 'S': 'N', 'E': 'W', 'W': 'E'}
 TARGET_CELLS = {(4, 4), (5, 4), (4, 5), (5, 5)}
-START_CELL = (0, ROWS - 1)
+START_CELL = (0, ROWS - 1)                  # bottom-left corner; its only opening is North (the next cell clockwise)
+MAZE_EXTRA_OPENINGS = 6                     # walls knocked out after carving, for the loops rule 5.e expects
 
 # Pixel Dimensions
 MAZE_PIXEL_WIDTH = (COLS * CELL_SIZE) + ((COLS + 1) * WALL_THICKNESS)

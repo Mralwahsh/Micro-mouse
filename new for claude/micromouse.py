@@ -8,7 +8,9 @@ from mapper import Mapper
 from sensors import SensorArray, reading_at
 from body import RobotBody
 from config import (PHYSICS_HZ, SENSOR_LATENCY_S, COLS, ROWS, DIRECTIONS, OPPOSITE, TARGET_CELLS, START_CELL, CELL_SIZE_CM,
-                    WALL_THICKNESS_CM, SENSORS, SENSOR_HZ, MAX_SPEED_CM_S, SEARCH_SPEED_CM_S, ACCEL_CM_S2,
+                    WALL_THICKNESS_CM, SENSORS, SENSOR_HZ, MAX_SPEED_CM_S, SEARCH_SPEED_CM_S, EXPLORE_SPEED_CM_S, ACCEL_CM_S2, TURN_RADIUS_CM,
+                    SEARCH_TURN_SPEED_CM_S, FAST_TURN_SPEED_CM_S, MOTOR_LAG_COMP_S,
+                    ARC_K_RADIUS, ARC_K_HEADING,
                     MAX_TURN_RAD_S, TURN_ACCEL_RAD_S2, WHEEL_MISMATCH, START_POS_ERROR_CM,
                     START_ANGLE_ERROR_DEG, CENTER_KP, CENTER_KH, MAX_STEER_RAD_S,
                     OBS_K_OFFSET, OBS_K_HEADING, OBS_K_CURVE)
@@ -17,13 +19,19 @@ from config import (PHYSICS_HZ, SENSOR_LATENCY_S, COLS, ROWS, DIRECTIONS, OPPOSI
 HEADING_ANGLE = {'E': 0.0, 'S': math.pi / 2, 'W': math.pi, 'N': -math.pi / 2}
 # Time costs used to pick the quickest fast-run route
 CELL_TIME = CELL_SIZE_CM / MAX_SPEED_CM_S
-TURN_TIME = MAX_SPEED_CM_S / ACCEL_CM_S2 + 2 * math.sqrt((math.pi / 2) / TURN_ACCEL_RAD_S2)  # brake + turn + re-accelerate
+# a corner: slow to the turn speed and back up again, and the arc itself instead of two half cells
+TURN_TIME = ((MAX_SPEED_CM_S - FAST_TURN_SPEED_CM_S) ** 2 / (ACCEL_CM_S2 * MAX_SPEED_CM_S)
+             + (math.pi / 2) * TURN_RADIUS_CM / FAST_TURN_SPEED_CM_S - CELL_SIZE_CM / MAX_SPEED_CM_S)
+# a U-turn still has to stop and pivot on the spot
+PIVOT_TIME = MAX_SPEED_CM_S / ACCEL_CM_S2 + 2 * math.sqrt(math.pi / TURN_ACCEL_RAD_S2)
 DECISION_MARGIN_CM = 1.0        # decide the next move this far before the braking point
-WALL_FACE = CELL_SIZE_CM / 2 - WALL_THICKNESS_CM / 2    # centre line -> wall face (8.4 cm)
+WALL_FACE = CELL_SIZE_CM / 2 - WALL_THICKNESS_CM / 2    # centre line -> wall face (9.0 cm)
 LEFT_OF = {'N': 'W', 'E': 'N', 'S': 'E', 'W': 'S'}
-RIGHT_OF = {v: OPPOSITE[k] for k, v in LEFT_OF.items()}
+RIGHT_OF = {k: OPPOSITE[v] for k, v in LEFT_OF.items()}
 FRONT_TOF = next(s for s in SENSORS if s["kind"] == "TOF" and s["angle"] == 0)
 FRONT_SAMPLES = 4               # front-wall readings averaged before re-centring at a stop
+MAP_TRUST_CM = 25.0             # only readings this short correct the pose: far ones amplify heading error
+ALONG_GAIN = 0.2                # share of a wall-across-the-lane error applied per reading
 MAX_CURVE = 0.003               # rad/cm: a ~2% wheel-size mismatch, more than any real mouse has
 
 
@@ -89,6 +97,7 @@ class Micromouse:
         self.memory = Maze(is_blank_memory=True)
         self.mapper = Mapper(self.memory)
         self.sensors = None                     # built lazily against the physical maze
+        self.known_view = None                  # firmware: ray-cast model of the CONFIRMED walls
         self.round_steps = [0, 0, 0]            # cells entered per round
         self.round_times = [0.0, 0.0, 0.0]      # seconds per round
         self.max_offset = [0.0, 0.0, 0.0]       # telemetry: worst real off-centre while driving, cm
@@ -127,8 +136,12 @@ class Micromouse:
         self.est_heading = 0.0                  # observer: rad clockwise of the heading
         self.walls_seen = False                 # did a side wall correct the observer this tick?
         self.turn_settling = False
+        self.arc_next = None                    # side of a planned smooth turn in the target cell
+        self.arc_side = 1
+        self.arc_turned = 0.0
+        self.arc_center, self.arc_phi0 = (0.0, 0.0), 0.0
         self.enc_rate = 0.0                     # encoder turn this tick (rad)
-        self.true_trail = []                    # telemetry: where the REAL body went this round
+        self.true_trail = []                    # telemetry: (x, y, speed) of the REAL body this round
         self.pose_hist = deque([(self.px, self.py, self.theta)],
                                maxlen=max(1, round(SENSOR_LATENCY_S * PHYSICS_HZ)) + 1)
         self.front_samples = []
@@ -173,12 +186,17 @@ class Micromouse:
             self._plan_at_center()
         elif self.motion == "TURN":
             self._turn_step()
+        elif self.motion == "ARC":
+            self._arc_step()
         else:
             self._drive_step(dt)
         if self.state != "EXPLORING":
             return
-        v_cmd = self.v if self.motion == "DRIVE" else 0.0
-        w_cmd = self.steer if self.motion == "DRIVE" else (self.omega if self.motion == "TURN" else 0.0)
+        if self.motion == "ARC":
+            v_cmd, w_cmd = self.v, self._arc_omega()
+        else:
+            v_cmd = self.v if self.motion == "DRIVE" else 0.0
+            w_cmd = self.steer if self.motion == "DRIVE" else (self.omega if self.motion == "TURN" else 0.0)
         self._odometry(*self.body.step(v_cmd, w_cmd, dt))
         if self.body.crashed(self.sensors):
             self._finish_round(crashed=True)
@@ -187,16 +205,24 @@ class Micromouse:
             off = abs(self.true_offset())
             self.max_offset[self.current_round - 1] = max(self.max_offset[self.current_round - 1], off)
         self.sensor_timer_trail = getattr(self, "sensor_timer_trail", 0) + 1
-        if self.sensor_timer_trail % 8 == 0:
-            self.true_trail.append((self.body.px, self.body.py))
+        if self.sensor_timer_trail % 4 == 0:
+            self.true_trail.append((self.body.px, self.body.py, abs(self.body.wl + self.body.wr) / 2))
         self._track_cell()
 
     def _odometry(self, enc_dist, enc_turn):
         """Update the believed pose from what the wheel encoders measured this tick."""
+        self.enc_rate = enc_turn
+        if self.motion == "ARC":
+            # smooth turn: plain 2-D dead reckoning (the offset / heading estimates were folded in)
+            self.theta += enc_turn
+            self.arc_turned += enc_turn
+            self.px += math.cos(self.theta) * enc_dist
+            self.py += math.sin(self.theta) * enc_dist
+            self.pose_hist.append(self.believed_pose())
+            return
         fx, fy = DIRECTIONS[self.heading]
         self.px += fx * enc_dist
         self.py += fy * enc_dist
-        self.enc_rate = enc_turn
         self.pose_hist.append(self.believed_pose())
         if self.motion == "TURN":
             self.theta += enc_turn
@@ -225,10 +251,14 @@ class Micromouse:
         # the readings are SENSOR_LATENCY_S old: place them where we believed we were back then
         self.believed_readings = [reading_at(*self.pose_hist[0], r) for r in self.readings]
         changed = False
-        for r in self.believed_readings:
-            changed |= self.mapper.add_reading(r)
+        if self.motion in ("DRIVE", "AT_CENTER"):
+            # while rotating (corners, pivots) the believed beam directions are least certain and a
+            # 20 ms old reading can point several degrees off: don't let those readings edit the map
+            for r in self.believed_readings:
+                changed |= self.mapper.add_reading(r)
         if changed:
             self.flood = self._flood(optimistic=True)
+            self.known_view = None                        # the firmware's wall model changed
         self.walls_seen = False
         if self.motion == "DRIVE":
             self._observe_walls()
@@ -239,36 +269,60 @@ class Micromouse:
 
     # --------------------------------------------------------------- centering
     def _observe_walls(self):
-        """Correct the observer with every side-wall reading.
+        """Correct the pose estimate with every reading the mouse's own map can explain.
 
-        A side-looking sensor (mount sx, sy, angle a) hitting a side wall gives
-        z = side * (WALL_FACE - side*sx - d*|sin a|). For small heading errors that is
-        z = offset + y_hit * heading, where y_hit is how far ahead of the body centre
-        the beam lands - so the observer sees offset and heading mixed with a known lever.
+        Each TOF distance is compared with what it SHOULD read, ray-cast from the believed pose
+        (at the moment of the reading) against the walls the mouse has confirmed:
+          * hit a wall running along the lane  -> the difference is sideways error:
+            z = offset + y_hit * heading, so it corrects offset, heading and the wheel curve;
+          * hit a wall across the lane (e.g. the front wall) -> the difference is how far
+            along the lane the mouse really is;
+          * hit a post, nothing known, or far off the prediction -> not trusted, skipped.
+        The 2.5 cm IR can only see something right beside the body, so it is used directly.
         """
-        for r in self.readings:
+        if self.known_view is None:
+            self.known_view = SensorArray(self.memory, known_only=True)
+        fx, fy = DIRECTIONS[self.heading]
+        rx, ry = -fy, fx
+        for r in self.believed_readings:
             s = r.sensor
-            sin_a = math.sin(math.radians(s["angle"]))
-            if r.distance is None or abs(sin_a) < 0.5:
+            if r.distance is None:
                 continue
-            side = 1 if sin_a > 0 else -1
-            cos_a = math.cos(math.radians(s["angle"]))
-            y_hit = s["y"] + r.distance * cos_a
-            # the 2.5 cm IR can only be seeing something right beside the body (wall or flush post);
-            # the long diagonal TOFs must land on a wall the map already knows
-            if s["kind"] != "IR":
-                if not self._side_wall_at(side, y_hit):
-                    continue                             # beam isn't on a known side wall
-                if cos_a > 0.1 and self._front_wall_first(s, side, sin_a, cos_a):
-                    continue                             # the wall across the lane could catch it first
-            z = side * (WALL_FACE - side * s["x"] - r.distance * abs(sin_a))
-            err = z - (self.est_offset + y_hit * self.est_heading)
-            if abs(err) > (6.0 if s["kind"] == "IR" else 3.0):
-                continue      # outlier (post corner, noise spike); the short-range IR is trusted further
-            self.est_offset += OBS_K_OFFSET * err
-            self.est_heading += OBS_K_HEADING * err
-            self.est_curve = max(-MAX_CURVE, min(MAX_CURVE, self.est_curve + OBS_K_CURVE * err))
-            self.walls_seen = True
+            if s["kind"] == "IR":
+                sin_a = math.sin(math.radians(s["angle"]))
+                side = 1 if sin_a > 0 else -1
+                z = side * (WALL_FACE - side * s["x"] - r.distance * abs(sin_a))
+                self._correct_sideways(z - (self.est_offset + s["y"] * self.est_heading), 6.0)
+                continue
+            if r.distance > MAP_TRUST_CM:
+                continue
+            (ox, oy), (dx, dy) = r.origin, r.direction
+            hit = self.known_view.first_hit(ox, oy, dx, dy, r.distance + 6.0)
+            if hit is None or hit[1] == 'post':
+                continue
+            t_pred, kind = hit
+            innovation = r.distance - t_pred              # + = the wall is further than expected
+            if abs(innovation) > 3.0:
+                continue
+            if (kind == 'V') == (fx == 0):                # a wall running along the lane
+                u_side = dx * rx + dy * ry                # beam's sideways component (+ = right)
+                if abs(u_side) > 0.5:
+                    self._correct_sideways(-innovation * u_side, 3.0)
+            else:                                         # a wall across the lane
+                u_fwd = dx * fx + dy * fy
+                if abs(u_fwd) > 0.5:
+                    shift = -ALONG_GAIN * innovation * u_fwd
+                    self.px += fx * shift
+                    self.py += fy * shift
+
+    def _correct_sideways(self, err, gate):
+        """One observer update from a sideways error: measured minus predicted offset (cm)."""
+        if abs(err) > gate:
+            return                                        # outlier (post corner, noise spike)
+        self.est_offset += OBS_K_OFFSET * err
+        self.est_heading += OBS_K_HEADING * err
+        self.est_curve = max(-MAX_CURVE, min(MAX_CURVE, self.est_curve + OBS_K_CURVE * err))
+        self.walls_seen = True
 
     def _steer(self):
         """Steering law, every physics tick while driving straight.
@@ -280,44 +334,6 @@ class Micromouse:
         """
         steer = -(CENTER_KP * self.est_offset + CENTER_KH * self.est_heading) - self.est_curve * self.v
         self.steer = max(-MAX_STEER_RAD_S, min(MAX_STEER_RAD_S, steer))
-
-    def _front_wall_first(self, s, side, sin_a, cos_a):
-        """Could a forward-looking diagonal hit the wall ACROSS the lane before (or about when)
-        it reaches the side wall? Then the reading isn't a clean side-wall distance."""
-        d_side = (WALL_FACE - side * s["x"] - side * self.est_offset) / abs(sin_a)
-        fx, fy = DIRECTIONS[self.heading]
-        ahead = s["y"] + d_side * cos_a
-        ax, ay = self.px + fx * ahead, self.py + fy * ahead
-        cx, cy = int(ax // CELL_SIZE_CM), int(ay // CELL_SIZE_CM)
-        if not (0 <= cx < COLS and 0 <= cy < ROWS):
-            return True
-        lane = self.memory.grid[cx][cy]
-        if lane.walls_known[self.heading] and not lane.walls[self.heading]:
-            return False                                  # that cross wall is known to be absent
-        # distance from the body centre to the face of the wall across that cell
-        into = (ax * fx + ay * fy) % CELL_SIZE_CM
-        front_face = ahead + (CELL_SIZE_CM - into) - WALL_THICKNESS_CM / 2
-        d_front = (front_face - s["y"]) / cos_a
-        return d_front < d_side + 1.5
-
-    def _side_wall_at(self, side, ahead):
-        """Is there a known wall on this side (+1 right, -1 left), `ahead` cm in front of the body centre?"""
-        fx, fy = DIRECTIONS[self.heading]
-        ax, ay = self.px + fx * ahead, self.py + fy * ahead
-        # near a post the hit is only trustworthy if walls run through BOTH sides of that post
-        # (then the post face is flush with them); otherwise the beam may have slipped past a wall end
-        local = (ax * fx + ay * fy) % CELL_SIZE_CM
-        near_post = min(local, CELL_SIZE_CM - local) < WALL_THICKNESS_CM
-        shifts = (-WALL_THICKNESS_CM, WALL_THICKNESS_CM) if near_post else (0.0,)
-        d = RIGHT_OF[self.heading] if side > 0 else LEFT_OF[self.heading]
-        for shift in shifts:
-            cx, cy = int((ax + fx * shift) // CELL_SIZE_CM), int((ay + fy * shift) // CELL_SIZE_CM)
-            if not (0 <= cx < COLS and 0 <= cy < ROWS):
-                return False
-            cell = self.memory.grid[cx][cy]
-            if not (cell.walls_known[d] and cell.walls[d]):
-                return False
-        return True
 
     def _track_cell(self):
         """Notice when the body centre crosses into a new cell."""
@@ -382,17 +398,26 @@ class Micromouse:
         tx, ty = cell_center(*self.target)
         d_rem = (tx - self.px) * fx + (ty - self.py) * fy
 
-        if not self.decided and d_rem <= self.v ** 2 / (2 * ACCEL_CM_S2) + DECISION_MARGIN_CM:
+        if not self.decided and d_rem <= self._decision_distance():
             self._decide_after_target()
             tx, ty = cell_center(*self.target)
             d_rem = (tx - self.px) * fx + (ty - self.py) * fy
 
-        # brake profile: never faster than what still lets us stop at the target centre
-        v_max = MAX_SPEED_CM_S if self.mode == "FAST" else SEARCH_SPEED_CM_S
-        v_des = math.copysign(min(v_max, math.sqrt(2 * ACCEL_CM_S2 * abs(d_rem))), d_rem)
+        # speed profile: never faster than what still lets us stop at the target centre - or,
+        # when a smooth turn is planned there, reach its entry edge at the turn speed
+        v_max = self._speed_limit()
+        v_end = 0.0
+        if self.arc_next:
+            d_rem -= TURN_RADIUS_CM                         # distance to the arc's entry edge
+            v_end = self._turn_speed()
+            if d_rem <= self.v * MOTOR_LAG_COMP_S:          # start early: the motors lag
+                self._start_arc()
+                return
+        v_des = math.copysign(min(v_max, math.sqrt(v_end ** 2 + 2 * ACCEL_CM_S2 * abs(d_rem))), d_rem)
         self.v = _approach(self.v, v_des, ACCEL_CM_S2 * dt)
         step = self.v * dt
-        if self.decided and (abs(d_rem) < 0.05 or (abs(step) >= abs(d_rem) and abs(self.v) < 5)):
+        if self.decided and not self.arc_next and (
+                abs(d_rem) < 0.05 or (abs(step) >= abs(d_rem) and abs(self.v) < 5)):
             self.px, self.py, self.v = tx, ty, 0.0          # encoders say: arrived on the centre
             self.motion = "AT_CENTER"
             self.front_samples, self.steer = [], 0.0
@@ -424,15 +449,93 @@ class Micromouse:
         self.motion = "DRIVE"
         return True
 
+    def _turn_speed(self):
+        return FAST_TURN_SPEED_CM_S if self.mode == "FAST" else SEARCH_TURN_SPEED_CM_S
+
+    def _speed_limit(self):
+        """Full motor speed (381 rpm) on fast runs and through cells already mapped; slower only
+        when heading into a cell whose walls are not all confirmed yet."""
+        if self.mode == "FAST":
+            return MAX_SPEED_CM_S
+        cell = self.memory.grid[self.target[0]][self.target[1]]
+        return SEARCH_SPEED_CM_S if all(cell.walls_known.values()) else EXPLORE_SPEED_CM_S
+
+    def _decision_distance(self):
+        """How far before the target centre the next move must be decided: early enough to stop
+        at the centre, and early enough to slow down to the turn speed before a corner."""
+        stop = self.v ** 2 / (2 * ACCEL_CM_S2)
+        corner = TURN_RADIUS_CM + max(0.0, self.v ** 2 - self._turn_speed() ** 2) / (2 * ACCEL_CM_S2)
+        return max(stop, corner) + DECISION_MARGIN_CM
+
     def _decide_after_target(self):
-        """Approaching the target cell: keep going straight through it, or stop there?"""
+        """Approaching the target cell: straight through it, a smooth turn in it, or stop there?"""
         self.decided = True
+        self.arc_next = None
         tx, ty = self.target
         if (tx, ty) in self.target_cells:
             return                                            # stop in the goal
         step = self._choose_step(tx, ty, self.heading)
-        if step and step[0] == self.heading and self._edge_known_open(tx, ty, self.heading):
+        if not step:
+            return
+        d = step[0]
+        if not self._edge_known_open(tx, ty, d):
+            return                                            # not sure yet: stop and look
+        if d == self.heading:
             self.target, self.decided = (step[1], step[2]), False
+        elif d in (LEFT_OF[self.heading], RIGHT_OF[self.heading]):
+            self.arc_next = d                                 # corner this cell without stopping
+
+    def _start_arc(self):
+        """At the entry edge of the corner cell: fold the offset / heading estimates into the
+        pose and start the quarter circle."""
+        self.px, self.py, self.theta = self.believed_pose()
+        self.est_offset = self.est_heading = 0.0
+        self.arc_side = 1 if self.arc_next == RIGHT_OF[self.heading] else -1
+        self.arc_turned = 0.0
+        self.v = min(self._turn_speed(), self._speed_limit())
+        # the ideal arc is centred on the corner post shared by the entry and exit edges
+        cx, cy = cell_center(*self.target)
+        hx, hy = DIRECTIONS[self.heading]
+        dx, dy = DIRECTIONS[self.arc_next]
+        self.arc_center = (cx + (dx - hx) * TURN_RADIUS_CM, cy + (dy - hy) * TURN_RADIUS_CM)
+        entry_x, entry_y = cx - hx * TURN_RADIUS_CM, cy - hy * TURN_RADIUS_CM    # middle of the entry edge
+        self.arc_phi0 = math.atan2(entry_y - self.arc_center[1], entry_x - self.arc_center[0])
+        self.motion = "ARC"
+
+    def _arc_progress(self):
+        """How far round the quarter circle the (believed) position is, in radians."""
+        ox, oy = self.arc_center
+        return self.arc_side * _wrap(math.atan2(self.py - oy, self.px - ox) - self.arc_phi0)
+
+    def _arc_omega(self):
+        """Follow the ideal arc: nominal curvature, plus corrections for being off the circle
+        or off its tangent (from the encoder dead reckoning)."""
+        ox, oy = self.arc_center
+        radial = math.hypot(self.px - ox, self.py - oy) - TURN_RADIUS_CM      # + = outside the arc
+        tangent = math.atan2(self.py - oy, self.px - ox) + self.arc_side * math.pi / 2
+        w = (self.arc_side * self.v / TURN_RADIUS_CM + self.arc_side * ARC_K_RADIUS * radial
+             - ARC_K_HEADING * _wrap(self.theta - tangent))
+        return max(-MAX_TURN_RAD_S, min(MAX_TURN_RAD_S, w))
+
+    def _arc_step(self):
+        """Finish the quarter circle - a little early, because the motors keep turning a moment."""
+        if self._arc_progress() < math.pi / 2 - (self.v / TURN_RADIUS_CM) * MOTOR_LAG_COMP_S:
+            return
+        new = self.arc_next
+        ex, ey = cell_center(*self.target)                   # the corner cell ...
+        nx, ny = self.target[0] + DIRECTIONS[new][0], self.target[1] + DIRECTIONS[new][1]
+        self.heading, self.arc_next = new, None
+        # ... re-express the dead-reckoned pose in the new lane: along -> px/py, rest -> estimates
+        fx, fy = DIRECTIONS[new]
+        rx, ry = -fy, fx
+        lateral = (self.px - ex) * rx + (self.py - ey) * ry
+        self.px -= rx * lateral
+        self.py -= ry * lateral
+        self.est_offset = lateral
+        self.est_heading = _wrap(self.theta - HEADING_ANGLE[new])
+        self.theta = HEADING_ANGLE[new]
+        self.target, self.decided = (nx, ny), False
+        self.motion = "DRIVE"
 
     # ------------------------------------------------------------- flood fill
     def _edge_open(self, x, y, d, optimistic):
@@ -492,8 +595,8 @@ class Micromouse:
             for d, (dx, dy) in DIRECTIONS.items():
                 if not self._edge_known_open(x, y, d):
                     continue
-                turns = 0 if d == h else (2 if d == OPPOSITE[h] else 1)
-                nstate, ncost = (x + dx, y + dy, d), cost + CELL_TIME + turns * TURN_TIME
+                turn = 0 if d == h else (PIVOT_TIME if d == OPPOSITE[h] else TURN_TIME)
+                nstate, ncost = (x + dx, y + dy, d), cost + CELL_TIME + turn
                 if ncost < best.get(nstate, math.inf):
                     best[nstate], parent[nstate] = ncost, state
                     heapq.heappush(pq, (ncost, nstate))
