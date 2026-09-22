@@ -1,4 +1,5 @@
 # config.py
+import math
 
 # Grid Dimensions
 COLS, ROWS = 10, 10
@@ -37,11 +38,33 @@ SENSOR_DROPOUT = 0.005                  # chance a reading comes back as "out of
 WALL_EVIDENCE_THRESHOLD = 3             # net votes needed before an edge counts as known
 WALL_EVIDENCE_MAX = 10                  # votes saturate here so the map can still correct itself
 
-# Motion limits for the search run (continuous driving between cells)
-MAX_SPEED_CM_S = 50.0
-ACCEL_CM_S2 = 100.0
-MAX_TURN_DEG_S = 360.0
-TURN_ACCEL_DEG_S2 = 1440.0
+# Drive train: two wheels on the centre line of the body (so the mouse turns on the spot)
+WHEEL_DIAMETER_CM = 3.4
+MOTOR_MAX_RPM = 381                     # wheel rpm after the gearbox
+WHEEL_TRACK_CM = 7.0                    # distance between the two wheels (assumed - measure yours)
+MAX_SPEED_CM_S = math.pi * WHEEL_DIAMETER_CM * MOTOR_MAX_RPM / 60    # ≈ 67.8 cm/s
+ACCEL_CM_S2 = 200.0                     # max wheel acceleration (assumed - tune to your motors)
+SEARCH_SPEED_CM_S = 40.0                # slower while exploring so the sensors have time to map
+# Turning on the spot spins the wheels in opposite directions, so the same wheel limits apply
+MAX_TURN_RAD_S = 2 * MAX_SPEED_CM_S / WHEEL_TRACK_CM
+TURN_ACCEL_RAD_S2 = 2 * ACCEL_CM_S2 / WHEEL_TRACK_CM
+
+# Reality gap (simulation only - the firmware cannot see these): the body never moves exactly as commanded
+WHEEL_MISMATCH = 0.005                  # std-dev of each wheel's real/assumed diameter ratio (fixed per robot)
+WHEEL_SLIP_NOISE = 0.03                 # random slip on each wheel, every physics tick
+START_POS_ERROR_CM = 0.5                # hand-placement error at the start
+START_ANGLE_ERROR_DEG = 2.0
+MOTOR_TAU_S = 0.03                      # motors reach ~63% of a new speed command after this long
+SENSOR_LATENCY_S = 0.02                 # a TOF reading describes where the body was this long ago
+
+# Centering (firmware, encoders only - no IMU): an observer estimates offset, heading error and
+# the robot's own wheel-mismatch curve from the steering it commands + the side-wall distances
+CENTER_KP = 0.9                         # rad/s of steering per cm off-centre
+CENTER_KH = 9.0                         # rad/s of steering per rad of heading error
+MAX_STEER_RAD_S = 2.0
+OBS_K_OFFSET = 0.3                      # observer gains, applied per side-wall reading
+OBS_K_HEADING = 0.02                    # rad per cm of reading error
+OBS_K_CURVE = 0.0002                    # (rad/cm) per cm of reading error
 
 # Simulation timing
 PHYSICS_HZ = 200                        # physics / control loop rate

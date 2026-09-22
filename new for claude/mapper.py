@@ -9,6 +9,7 @@ HALF_WALL = WALL_THICKNESS_CM / 2
 POST_MARGIN = HALF_WALL + 1.5      # readings this close to a post are ambiguous and ignored
 HIT_TOLERANCE = HALF_WALL + 1.0    # extra free-space margin kept short of every hit
 DROPOUT_GUARD_CM = 10.0            # "nothing in range" right after a hit this far inside range = dropout
+MAP_RANGE_CM = 45.0                # only trust this much of a beam: the pose estimate is never perfect
 
 
 class Mapper:
@@ -88,12 +89,14 @@ class Mapper:
         """Fold one Reading into the map. Returns True if any edge became known / changed."""
         ox, oy = r.origin
         dx, dy = r.direction
-        rng = r.sensor["range"]
+        rng = min(r.sensor["range"], MAP_RANGE_CM)
         name = r.sensor["name"]
         last = self.last_distance.get(name)
         self.last_distance[name] = r.distance
-        if r.distance is None and last is not None and last < rng - DROPOUT_GUARD_CM:
+        if r.distance is None and last is not None and last < r.sensor["range"] - DROPOUT_GUARD_CM:
             return False    # a wall well inside range can't vanish in one sample: treat as a dropout
+        if r.distance is not None and r.distance > rng:
+            r = type(r)(r.sensor, r.origin, r.direction, None, r.end)   # too far to trust: free space only
         if r.distance is not None:
             sigma = IR_NOISE_CM if r.sensor["kind"] == "IR" else TOF_NOISE_CM + TOF_NOISE_FRAC * r.distance
             free_len = r.distance - HIT_TOLERANCE - 3 * sigma

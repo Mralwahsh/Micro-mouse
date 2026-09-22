@@ -30,6 +30,21 @@ def body_to_world(px, py, theta, bx, by):
     return px + rx * bx + fx * by, py + ry * bx + fy * by
 
 
+def beam(px, py, theta, s):
+    """Origin and unit direction of sensor s when the mouse is at pose (px, py, theta)."""
+    ox, oy = body_to_world(px, py, theta, s["x"], s["y"])
+    a = theta + math.radians(s["angle"])
+    dx, dy = math.cos(a), math.sin(a)
+    return ox, oy, (0.0 if abs(dx) < 1e-12 else dx), (0.0 if abs(dy) < 1e-12 else dy)
+
+
+def reading_at(px, py, theta, r):
+    """The same measured distance, placed at another pose (e.g. where the mouse BELIEVES it is)."""
+    ox, oy, dx, dy = beam(px, py, theta, r.sensor)
+    reach = r.distance if r.distance is not None else r.sensor["range"]
+    return Reading(r.sensor, (ox, oy), (dx, dy), r.distance, (ox + dx * reach, oy + dy * reach))
+
+
 class SensorArray:
     """Simulated distance sensors firing against the real wall/post geometry of a maze.
 
@@ -85,11 +100,7 @@ class SensorArray:
         """Read every sensor from the pose (px, py, theta). Distances carry sensor noise."""
         readings = []
         for s in SENSORS:
-            ox, oy = body_to_world(px, py, theta, s["x"], s["y"])
-            a = theta + math.radians(s["angle"])
-            dx, dy = math.cos(a), math.sin(a)
-            if abs(dx) < 1e-12: dx = 0.0
-            if abs(dy) < 1e-12: dy = 0.0
+            ox, oy, dx, dy = beam(px, py, theta, s)
 
             dist = self.true_distance(ox, oy, dx, dy, s["range"])
             if dist is not None:

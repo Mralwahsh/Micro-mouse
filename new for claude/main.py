@@ -1,4 +1,5 @@
 # main.py
+import math
 import pygame
 import sys
 from config import *
@@ -33,7 +34,9 @@ TOGGLES = [
     ("flood",      "Flood Values",    (200, 200, 200)),
     ("mouse",      "Mouse Position",  COLOR_PHYSICAL_MOUSE),
     ("rays",       "Sensor Rays",     (255, 110, 110)),
+    ("trail",      "Real Path",       (0, 220, 220)),
 ]
+TOGGLES_ON_AT_START = {"mouse", "trail"}   # show the REAL robot and how it weaves by default
 TOGGLE_ROWS = (len(TOGGLES) + TOGGLE_COLS - 1) // TOGGLE_COLS
 
 STATS_Y = TOGGLES_Y + TOGGLE_ROWS * (TOGGLE_H + TOGGLE_GAP) + 14
@@ -66,7 +69,7 @@ class DashboardApp:
 
         self.speed_idx = SIM_SPEEDS.index(DEFAULT_SIM_SPEED)
         self.sim_accum = 0.0          # simulated seconds waiting to be stepped
-        self.toggles = {key: False for key, _, _ in TOGGLES}
+        self.toggles = {key: key in TOGGLES_ON_AT_START for key, _, _ in TOGGLES}
         self.toggle_rects = {}
         for i, (key, _, _) in enumerate(TOGGLES):
             col, row = i % TOGGLE_COLS, i // TOGGLE_COLS
@@ -113,18 +116,18 @@ class DashboardApp:
         """Real-world cm (origin = centre of the top-left post) to screen pixels."""
         return (ox + WALL_THICKNESS / 2 + wx * WORLD_PX, oy + WALL_THICKNESS / 2 + wy * WORLD_PX)
 
-    def draw_mouse(self, ox, oy, color, readings=None):
-        """Rectangular body at real scale (MOUSE_WIDTH_CM x MOUSE_LENGTH_CM) at the mouse's true pose.
+    def draw_mouse(self, ox, oy, color, pose, readings=None):
+        """Rectangular body at real scale (MOUSE_WIDTH_CM x MOUSE_LENGTH_CM) at pose (px, py, theta).
         With readings, also draws every sensor and its beam (dot = where the beam hit)."""
-        m = self.mouse
+        px, py, theta = pose
         hw, hl = MOUSE_WIDTH_CM / 2, MOUSE_LENGTH_CM / 2
-        corners = [body_to_world(m.px, m.py, m.theta, bx, by) for bx, by in ((-hw, hl), (hw, hl), (hw, -hl), (-hw, -hl))]
+        corners = [body_to_world(px, py, theta, bx, by) for bx, by in ((-hw, hl), (hw, hl), (hw, -hl), (-hw, -hl))]
         body = [self.world_to_px(ox, oy, *c) for c in corners]
         pygame.draw.polygon(self.screen, color, body)
         pygame.draw.polygon(self.screen, (255, 255, 255), body, 1)
 
         # white arrow marks the front of the mouse
-        arrow = [body_to_world(m.px, m.py, m.theta, bx, by) for bx, by in ((0, hl - 0.5), (-hw * 0.4, hl - 3.5), (hw * 0.4, hl - 3.5))]
+        arrow = [body_to_world(px, py, theta, bx, by) for bx, by in ((0, hl - 0.5), (-hw * 0.4, hl - 3.5), (hw * 0.4, hl - 3.5))]
         pygame.draw.polygon(self.screen, (255, 255, 255), [self.world_to_px(ox, oy, *p) for p in arrow])
 
         for r in readings or []:
@@ -148,6 +151,7 @@ class DashboardApp:
         """Panel 1: ground-truth maze plus whichever overlays are switched on."""
         ox, oy = PANEL_1_X, PANEL_TOP
         self.draw_title("The Maze", ox)
+        self.screen.set_clip(pygame.Rect(ox, oy, MAZE_PIXEL_WIDTH, MAZE_PIXEL_HEIGHT))
         pygame.draw.rect(self.screen, COLOR_FOG, (ox, oy, MAZE_PIXEL_WIDTH, MAZE_PIXEL_HEIGHT))
 
         for x in range(COLS):
@@ -180,16 +184,26 @@ class DashboardApp:
             self.draw_path(ox, oy, solution_path, (255, 200, 0), 5)
         if self.toggles["shortest"]:
             self.draw_path(ox, oy, self.absolute_shortest_path, COLOR_SOLUTION, 3)
-        if self.toggles["mouse"] or self.toggles["rays"]:
-            self.draw_mouse(ox, oy, COLOR_PHYSICAL_MOUSE, self.mouse.readings if self.toggles["rays"] else None)
+        m = self.mouse
+        if self.toggles["trail"] and len(m.true_trail) > 1:
+            pts = [self.world_to_px(ox, oy, x, y) for x, y in m.true_trail + [(m.body.px, m.body.py)]]
+            pygame.draw.lines(self.screen, (0, 220, 220), False, pts, 1)
+        crashed = m.round_modes[m.current_round - 1] == "CRASH"
+        if self.toggles["mouse"] or self.toggles["rays"] or crashed:
+            b = m.body                                            # where the robot REALLY is
+            self.draw_mouse(ox, oy, (255, 60, 60) if crashed else COLOR_PHYSICAL_MOUSE, (b.px, b.py, b.theta),
+                            m.readings if self.toggles["rays"] else None)
+        self.screen.set_clip(None)
 
     def draw_running_maze(self):
         """Panel 2: only what the mouse has sensed, its trail this round, and the mouse itself."""
         ox, oy = PANEL_2_X, PANEL_TOP
         title = "Running Maze"
         if self.mouse.state != "IDLE":
-            title += f"  (Round {self.mouse.current_round}/{self.mouse.max_rounds})"
+            mode = self.mouse.round_modes[self.mouse.current_round - 1] or self.mouse.mode
+            title += f"  (Round {self.mouse.current_round}/{self.mouse.max_rounds} - {mode})"
         self.draw_title(title, ox)
+        self.screen.set_clip(pygame.Rect(ox, oy, MAZE_PIXEL_WIDTH, MAZE_PIXEL_HEIGHT))
         pygame.draw.rect(self.screen, (0, 0, 0), (ox, oy, MAZE_PIXEL_WIDTH, MAZE_PIXEL_HEIGHT))
 
         for x in range(COLS):
@@ -212,7 +226,10 @@ class DashboardApp:
         # every recent sensor hit, as the mouse measured it: the raw material of its map
         for hx, hy in self.mouse.mapper.hits:
             pygame.draw.circle(self.screen, (255, 140, 140), self.world_to_px(ox, oy, hx, hy), 1)
-        self.draw_mouse(ox, oy, COLOR_MEMORY_MOUSE, self.mouse.readings)
+        m = self.mouse                                            # where the robot BELIEVES it is
+        self.draw_mouse(ox, oy, (255, 60, 60) if m.round_modes[m.current_round - 1] == "CRASH" else COLOR_MEMORY_MOUSE,
+                        m.believed_pose(), m.believed_readings)
+        self.screen.set_clip(None)
 
     def draw_toggles(self, mouse_pos):
         self.draw_title("Overlays", SIDEBAR_X)
@@ -243,8 +260,15 @@ class DashboardApp:
         rows = [
             (f"State: {m.state}", COLOR_TEXT_METRIC),
             ("Cells: " + " | ".join(f"R{i + 1} {s}" for i, s in enumerate(m.round_steps)), COLOR_TEXT_METRIC),
-            ("Time: " + " | ".join(f"R{i + 1} {t:.1f}s" for i, t in enumerate(m.round_times)), COLOR_TEXT_METRIC),
-            (f"Velocity: {abs(m.v):.0f} cm/s   ({m.motion.replace('_', ' ').lower()})", COLOR_TEXT_METRIC),
+            ("Time: " + " | ".join(f"R{i + 1} {t:.1f}s" + (f" {md[0]}" if md else "")
+                                   for i, (t, md) in enumerate(zip(m.round_times, m.round_modes))), COLOR_TEXT_METRIC),
+            (f"Velocity: {abs(m.v):.0f} cm/s = {abs(m.v) * 60 / (math.pi * WHEEL_DIAMETER_CM):.0f} rpm "
+             f"({m.motion.replace('_', ' ').lower()})", COLOR_TEXT_METRIC),
+            (f"Off-centre: {m.true_offset():+.1f} cm (thinks {m.est_offset:+.1f})   heading: "
+             f"{math.degrees((m.body.theta - m.theta + math.pi) % (2 * math.pi) - math.pi):+.1f}°",
+             (255, 120, 120) if abs(m.true_offset()) > 2 else COLOR_TEXT_METRIC),
+            ("Worst off-centre: " + " | ".join(f"R{i + 1} {o:.1f}" for i, o in enumerate(m.max_offset)) + " cm",
+             COLOR_TEXT_METRIC),
             (f"Mouse best: {best}", (255, 200, 0)),
             (f"Shortest: {sp} steps / {Maze.count_turns(self.absolute_shortest_path)} turns", COLOR_SOLUTION),
             (f"Least turns: {lt} steps / {Maze.count_turns(self.least_turn_path)} turns", COLOR_LEAST_TURN),
@@ -271,7 +295,8 @@ class DashboardApp:
         pygame.draw.rect(self.screen, COLOR_BUTTON_HOVER if self.explore_btn.collidepoint(mouse_pos) else COLOR_BUTTON, self.explore_btn, border_radius=5)
         btn_text = "Start Round 1"
         if self.mouse.state == "EXPLORING": btn_text = f"Running R{self.mouse.current_round}..."
-        elif self.mouse.state == "ROUND_PAUSED": btn_text = f"Start Round {self.mouse.current_round + 1}"
+        elif self.mouse.state == "ROUND_PAUSED":
+            btn_text = f"R{self.mouse.current_round + 1}: {self.mouse.next_round_mode().title()} Run"
         elif self.mouse.state == "DONE": btn_text = "Complete"
         text_surf = self.font_btn.render(btn_text, True, (255, 255, 255))
         self.screen.blit(text_surf, text_surf.get_rect(center=self.explore_btn.center))
