@@ -3,17 +3,16 @@ import heapq
 import math
 import random
 from collections import deque
-from maze import Maze, START_OPENING
+from maze import Maze
 from mapper import Mapper
 from sensors import SensorArray, reading_at
 from body import RobotBody
 from config import (PHYSICS_HZ, SENSOR_LATENCY_S, COLS, ROWS, DIRECTIONS, OPPOSITE, TARGET_CELLS, START_CELL, CELL_SIZE_CM,
-                    WALL_THICKNESS_CM, SENSORS, SENSOR_HZ, MAX_SPEED_CM_S, SEARCH_SPEED_CM_S, EXPLORE_SPEED_CM_S, HOME_SPEED_CM_S, ACCEL_CM_S2, TURN_RADIUS_CM,
+                    WALL_THICKNESS_CM, SENSORS, SENSOR_HZ, MAX_SPEED_CM_S, SEARCH_SPEED_CM_S, EXPLORE_SPEED_CM_S, ACCEL_CM_S2, TURN_RADIUS_CM,
                     SEARCH_TURN_SPEED_CM_S, FAST_TURN_SPEED_CM_S, MOTOR_LAG_COMP_S,
                     ARC_K_RADIUS, ARC_K_HEADING,
                     MAX_TURN_RAD_S, TURN_ACCEL_RAD_S2, WHEEL_MISMATCH, START_POS_ERROR_CM,
-                    START_ANGLE_ERROR_DEG, START_BACKOFF_CM, MOUSE_LENGTH_CM, AUTO_RETURN,
-                    CENTER_KP, CENTER_KH, MAX_STEER_RAD_S,
+                    START_ANGLE_ERROR_DEG, CENTER_KP, CENTER_KH, MAX_STEER_RAD_S,
                     OBS_K_OFFSET, OBS_K_HEADING, OBS_K_CURVE)
 
 # Heading angle of each compass direction (world y axis points down, so North = -90 deg)
@@ -88,6 +87,7 @@ class Micromouse:
     """
 
     def __init__(self):
+        self.max_rounds = 3
         self.target_cells = set(TARGET_CELLS)
         self.start = START_CELL
         self.reset_all()
@@ -98,9 +98,13 @@ class Micromouse:
         self.mapper = Mapper(self.memory)
         self.sensors = None                     # built lazily against the physical maze
         self.known_view = None                  # firmware: ray-cast model of the CONFIRMED walls
-        self.runs = []                          # one entry per run attempted (see begin_run)
+        self.round_steps = [0, 0, 0]            # cells entered per round
+        self.round_times = [0.0, 0.0, 0.0]      # seconds per round
+        self.max_offset = [0.0, 0.0, 0.0]       # telemetry: worst real off-centre while driving, cm
+        self.round_modes = ["SEARCH", None, None]
         self.mode = "SEARCH"
         self.route = {}                         # FAST mode: cell -> direction to drive
+        self.current_round = 1
         self.state = "IDLE"
         self.solved_optimally = False
         self.global_visited = set([self.start])
@@ -110,20 +114,12 @@ class Micromouse:
         self._place_at_start()
         self.flood = self._flood(optimistic=True)
 
-    def _place_at_start(self, by_hand=True):
-        """Ready for a run at the BACK of the start cell, facing north: the timer only starts when
-        the front edge leaves the cell, so this run-up is free speed (rule 6.1.f).
-
-        by_hand: the operator sets it down there (a fresh placement error). Otherwise the mouse
-        drove home and parked itself, so its real pose is kept exactly as it left it.
-        """
+    def _place_at_start(self):
+        """Set the mouse down (by hand) in the centre of the start cell, facing north."""
         self.x, self.y = self.start
-        cx, cy = cell_center(*self.start)
-        if by_hand:
-            self.px = cx - DIRECTIONS['N'][0] * START_BACKOFF_CM
-            self.py = cy - DIRECTIONS['N'][1] * START_BACKOFF_CM
-            self.theta = HEADING_ANGLE['N']
+        self.px, self.py = cell_center(*self.start)
         self.heading = 'N'
+        self.theta = HEADING_ANGLE['N']
         self.v = 0.0                            # forward speed, cm/s
         self.omega = 0.0                        # turn rate, rad/s
         self.motion = "AT_CENTER"               # AT_CENTER | TURN | DRIVE
@@ -145,86 +141,41 @@ class Micromouse:
         self.arc_turned = 0.0
         self.arc_center, self.arc_phi0 = (0.0, 0.0), 0.0
         self.enc_rate = 0.0                     # encoder turn this tick (rad)
-        self.true_trail = []                    # telemetry: (x, y, speed) of the REAL body this run
+        self.true_trail = []                    # telemetry: (x, y, speed) of the REAL body this round
         self.pose_hist = deque([(self.px, self.py, self.theta)],
                                maxlen=max(1, round(SENSOR_LATENCY_S * PHYSICS_HZ)) + 1)
         self.front_samples = []
         self.calibrated = False                 # front-wall re-centre done at this stop?
         self.recentering = False
-        self.run_clock = 0.0
-        self.phase = "TO_GOAL"                  # TO_GOAL -> TO_START -> (park) -> run over
-        self.nav_cells = set(self.target_cells)
-        self.parked = False
-        if by_hand:
-            # set down by hand: never exactly on the centre or exactly straight
-            err = START_POS_ERROR_CM
-            self.body = RobotBody(self.px + random.uniform(-err, err), self.py + random.uniform(-err, err),
-                                  self.theta + math.radians(random.uniform(-START_ANGLE_ERROR_DEG,
-                                                                          START_ANGLE_ERROR_DEG)),
-                                  self.wheel_gain)
+        # the real body: set down by hand, never exactly on the centre or exactly straight
+        err = START_POS_ERROR_CM
+        self.body = RobotBody(self.px + random.uniform(-err, err), self.py + random.uniform(-err, err),
+                              self.theta + math.radians(random.uniform(-START_ANGLE_ERROR_DEG, START_ANGLE_ERROR_DEG)),
+                              self.wheel_gain)
         self.memory.grid[self.x][self.y].discovered = True
-        self.front_point = self._front_point()  # for the official start / finish line crossings
 
-    def next_run_mode(self):
-        """Explore until the map proves the best route, then race it."""
-        return "FAST" if self.solved_optimally and self._fast_route() else "SEARCH"
+    def next_round_mode(self):
+        if self.solved_optimally or self.current_round + 1 == self.max_rounds:
+            return "FAST"
+        return "SEARCH"
 
-    def begin_run(self):
-        """Send the mouse off from the start cell. It is placed by hand unless it drove home itself."""
-        drove_home = bool(self.runs) and self.runs[-1]["returned"]
-        self.mode = self.next_run_mode()
-        self._place_at_start(by_hand=not drove_home)
+    def start_next_round(self):
+        self.mode = self.next_round_mode()
+        self.current_round += 1
+        self._place_at_start()
         self.route = self._fast_route() if self.mode == "FAST" else {}
         if not self.route:
             self.mode = "SEARCH"                # no confirmed route yet: keep exploring
-        self.runs.append({"mode": self.mode, "time": None, "cells": 0, "max_offset": 0.0,
-                          "crashed": False, "started": False, "returned": False})
+        self.round_modes[self.current_round - 1] = self.mode
         self.global_visited.add(self.start)
         self.state = "EXPLORING"
         self.flood = self._flood(optimistic=True)
-
-    @property
-    def run(self):
-        return self.runs[-1] if self.runs else {"mode": self.mode, "time": None, "cells": 0,
-                                                "max_offset": 0.0, "crashed": False, "started": False,
-                                                "returned": False}
-
-    def official_times(self):
-        return [r["time"] for r in self.runs if r["time"] is not None]
-
-    def _front_point(self):
-        """The front edge of the REAL body - what the judges' timing gates see."""
-        return (self.body.px + math.cos(self.body.theta) * MOUSE_LENGTH_CM / 2,
-                self.body.py + math.sin(self.body.theta) * MOUSE_LENGTH_CM / 2)
-
-    def _crossed(self, key, was, now):
-        """Did the front edge cross this wall slot (start / finish line) between two ticks?"""
-        kind, a, b = key
-        if kind == 'H':
-            line, along0, along1 = b * CELL_SIZE_CM, a * CELL_SIZE_CM, (a + 1) * CELL_SIZE_CM
-            before, after, pos = was[1], now[1], now[0]
-        else:
-            line, along0, along1 = a * CELL_SIZE_CM, b * CELL_SIZE_CM, (b + 1) * CELL_SIZE_CM
-            before, after, pos = was[0], now[0], now[1]
-        return (before - line) * (after - line) < 0 and along0 <= pos <= along1
-
-    def _check_timing_lines(self, physical_maze):
-        """Official run time: front edge over the start line, then over the goal entrance."""
-        was, now = self.front_point, self._front_point()
-        self.front_point = now
-        run = self.run
-        if not run["started"]:
-            if self._crossed(Maze.edge_key(*self.start, START_OPENING), was, now):
-                run["started"] = True
-        elif run["time"] is None and self._crossed(physical_maze.goal_entrance, was, now):
-            run["time"] = self.run_clock
 
     # -------------------------------------------------------------- main tick
     def update(self, physical_maze, dt):
         if self.state != "EXPLORING":
             return
-        if self.run["started"] and self.run["time"] is None:
-            self.run_clock += dt                          # the official clock, start line -> finish line
+        self.round_times[self.current_round - 1] += dt
 
         self.sensor_timer += dt
         if self.sensor_timer >= 1.0 / SENSOR_HZ:
@@ -250,9 +201,9 @@ class Micromouse:
         if self.body.crashed(self.sensors):
             self._finish_round(crashed=True)
             return
-        self._check_timing_lines(physical_maze)
         if self.motion == "DRIVE":
-            self.run["max_offset"] = max(self.run["max_offset"], abs(self.true_offset()))
+            off = abs(self.true_offset())
+            self.max_offset[self.current_round - 1] = max(self.max_offset[self.current_round - 1], off)
         self.sensor_timer_trail = getattr(self, "sensor_timer_trail", 0) + 1
         if self.sensor_timer_trail % 4 == 0:
             self.true_trail.append((self.body.px, self.body.py, abs(self.body.wl + self.body.wr) / 2))
@@ -400,21 +351,13 @@ class Micromouse:
         self.round_visited.add((cx, cy))
         self.global_visited.add((cx, cy))
         self.path_stack.append((cx, cy))
-        self.run["cells"] += 1
+        self.round_steps[self.current_round - 1] += 1
 
     # ------------------------------------------------------------------ motion
     def _plan_at_center(self):
         if not self.calibrated and self._front_wall_recenter():
             return
-        if (self.x, self.y) in self.nav_cells:
-            if self.phase == "TO_GOAL":
-                if not AUTO_RETURN:
-                    self._finish_round()                  # reached the goal: the operator carries it back
-                    return
-                self._start_return()                      # ... or it drives itself home
-                return
-            if not self._park_at_start():                 # home: line up for the next run
-                return
+        if (self.x, self.y) in self.target_cells:
             self._finish_round()
             return
         step = self._choose_step(self.x, self.y, self.heading)
@@ -429,30 +372,6 @@ class Micromouse:
             self.target, self.decided = (nx, ny), False
             self.motion = "DRIVE"
         # else: wait here - the front sensor is still confirming the edge ahead
-
-    def _start_return(self):
-        """The run is scored; now drive back to the start (untimed) to line up for the next one.
-        On the way the mouse keeps mapping, so a search run also explores on the way home."""
-        self.phase = "TO_START"
-        self.nav_cells = {self.start}
-        self.flood = self._flood(optimistic=True)
-
-    def _park_at_start(self):
-        """Back in the start cell: face North and reverse to the flying-start spot. True when done."""
-        if self.heading != START_OPENING:
-            self.turn_to = START_OPENING
-            self.motion = "TURN"
-            return False
-        if not self.parked:
-            # tell the controller we are START_BACKOFF_CM past the centre: it reverses that far
-            fx, fy = DIRECTIONS[self.heading]
-            self.px += fx * START_BACKOFF_CM
-            self.py += fy * START_BACKOFF_CM
-            self.target, self.decided, self.recentering = self.start, True, True
-            self.motion = "DRIVE"
-            self.parked = True
-            return False
-        return True
 
     def _turn_step(self):
         # the firmware measures its turn with the wheel encoders
@@ -531,14 +450,11 @@ class Micromouse:
         return True
 
     def _turn_speed(self):
-        corner = FAST_TURN_SPEED_CM_S if self.mode == "FAST" else SEARCH_TURN_SPEED_CM_S
-        return min(corner, self._speed_limit())
+        return FAST_TURN_SPEED_CM_S if self.mode == "FAST" else SEARCH_TURN_SPEED_CM_S
 
     def _speed_limit(self):
         """Full motor speed (381 rpm) on fast runs and through cells already mapped; slower only
         when heading into a cell whose walls are not all confirmed yet."""
-        if self.phase == "TO_START":
-            return HOME_SPEED_CM_S
         if self.mode == "FAST":
             return MAX_SPEED_CM_S
         cell = self.memory.grid[self.target[0]][self.target[1]]
@@ -556,17 +472,8 @@ class Micromouse:
         self.decided = True
         self.arc_next = None
         tx, ty = self.target
-        if (tx, ty) in self.nav_cells:
-            if self.phase != "TO_GOAL":
-                return                                    # stop in the start cell
-            # the finish line is the goal ENTRANCE, so don't brake for it: cross at full speed and
-            # use the room behind it to stop (rule 6.1.f)
-            fx, fy = DIRECTIONS[self.heading]
-            deeper = (tx + fx, ty + fy)
-            if deeper in self.target_cells and not (self.memory.grid[tx][ty].walls_known[self.heading]
-                                                    and self.memory.grid[tx][ty].walls[self.heading]):
-                self.target = deeper
-            return                                            # ... then stop inside the goal
+        if (tx, ty) in self.target_cells:
+            return                                            # stop in the goal
         step = self._choose_step(tx, ty, self.heading)
         if not step:
             return
@@ -643,15 +550,11 @@ class Micromouse:
     def _edge_known_open(self, x, y, d):
         return self._edge_open(x, y, d, optimistic=False)
 
-    def _flood(self, optimistic, goals=None):
-        """BFS distance-to-nearest-goal for every cell (None = unreachable).
-
-        `goals` defaults to wherever the mouse is heading now: the centre on the way out,
-        the start cell on the way back.
-        """
+    def _flood(self, optimistic):
+        """BFS distance-to-nearest-goal for every cell (None = unreachable)."""
         dist = [[None] * ROWS for _ in range(COLS)]
         q = deque()
-        for gx, gy in (goals if goals is not None else self.nav_cells):
+        for gx, gy in self.target_cells:
             dist[gx][gy] = 0
             q.append((gx, gy))
 
@@ -700,13 +603,11 @@ class Micromouse:
         return {}
 
     def _choose_step(self, x, y, heading):
-        if self.phase != "TO_GOAL":
-            pass                                          # on the way home: plain flood fill
-        elif self.mode == "FAST" and (x, y) in self.route and not self._edge_known_open(x, y, self.route[(x, y)]):
+        if self.mode == "FAST" and (x, y) in self.route and not self._edge_known_open(x, y, self.route[(x, y)]):
             self.route = self._fast_route()             # the map changed under the route: re-plan
             if not self.route:
-                self.mode = self.run["mode"] = "SEARCH"
-        if self.phase == "TO_GOAL" and self.mode == "FAST" and (x, y) in self.route:
+                self.mode = self.round_modes[self.current_round - 1] = "SEARCH"
+        if self.mode == "FAST" and (x, y) in self.route:
             d = self.route[(x, y)]
             return d, x + DIRECTIONS[d][0], y + DIRECTIONS[d][1]
         best_key = None
@@ -737,17 +638,22 @@ class Micromouse:
 
         return best_move
 
-    # -------------------------------------------------------------- end of a run
+    # ------------------------------------------------------------ round end
     def _finish_round(self, crashed=False):
-        """A run is over: it reached the goal, crashed, or is boxed in. The operator picks it up."""
+        # solved_optimally stays as an *informational* flag (shown in telemetry):
+        # the confirmed best route is already as short as the optimistic lower
+        # bound, so later rounds cannot improve it. We no longer stop early on
+        # it - every run always plays out the full 3 rounds.
         self.v = self.omega = 0.0
-        self.run["crashed"] = crashed
-        self.run["returned"] = not crashed and self.phase == "TO_START"
-        # solved_optimally: the confirmed best route is already as short as the optimistic lower
-        # bound, so more exploring cannot improve it - from here on the mouse races.
-        confirmed = self._flood(optimistic=False, goals=self.target_cells)
-        optimistic = self._flood(optimistic=True, goals=self.target_cells)
+        if crashed:
+            self.round_modes[self.current_round - 1] = "CRASH"
+        confirmed = self._flood(optimistic=False)
+        optimistic = self._flood(optimistic=True)
         sx, sy = self.start
         if confirmed[sx][sy] is not None and confirmed[sx][sy] == optimistic[sx][sy]:
             self.solved_optimally = True
-        self.state = "RUN_OVER"
+
+        if self.current_round < self.max_rounds:
+            self.state = "ROUND_PAUSED"
+        else:
+            self.state = "DONE"

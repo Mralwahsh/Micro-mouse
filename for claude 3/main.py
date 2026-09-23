@@ -4,7 +4,7 @@ import pygame
 import sys
 from config import *
 from maze import Maze, START_OPENING
-from match import Match
+from micromouse import Micromouse
 from sensors import body_to_world
 
 # ---- Two-panel layout (derived from config so the grid size can change) ----
@@ -87,8 +87,7 @@ class DashboardApp:
 
     def _initialize_simulation(self):
         self.physical_maze = Maze(is_blank_memory=False)
-        self.match = Match(self.physical_maze)
-        self.mouse = self.match.mouse
+        self.mouse = Micromouse()
         self.absolute_shortest_path = self.physical_maze.get_shortest_path(*START_CELL)
         self.least_turn_path = self.physical_maze.get_least_turn_path(*START_CELL)
 
@@ -211,7 +210,7 @@ class DashboardApp:
             for (x1, y1, _), (x2, y2, v) in zip(m.true_trail, m.true_trail[1:]):
                 pygame.draw.line(self.screen, speed_color(v), self.world_to_px(ox, oy, x1, y1),
                                  self.world_to_px(ox, oy, x2, y2), 3)
-        crashed = m.run["crashed"]
+        crashed = m.round_modes[m.current_round - 1] == "CRASH"
         if self.toggles["mouse"] or self.toggles["rays"] or crashed:
             b = m.body                                            # where the robot REALLY is
             self.draw_mouse(ox, oy, (255, 60, 60) if crashed else COLOR_PHYSICAL_MOUSE, (b.px, b.py, b.theta),
@@ -222,10 +221,9 @@ class DashboardApp:
         """Panel 2: only what the mouse has sensed, its trail this round, and the mouse itself."""
         ox, oy = PANEL_2_X, PANEL_TOP
         title = "Running Maze"
-        if self.match.state != "READY":
-            run = self.mouse.run
-            what = "CRASH" if run["crashed"] else ("HOME RUN" if self.mouse.phase == "TO_START" else run["mode"])
-            title += f"  (run {len(self.mouse.runs)} - {what})"
+        if self.mouse.state != "IDLE":
+            mode = self.mouse.round_modes[self.mouse.current_round - 1] or self.mouse.mode
+            title += f"  (Round {self.mouse.current_round}/{self.mouse.max_rounds} - {mode})"
         self.draw_title(title, ox)
         self.screen.set_clip(pygame.Rect(ox, oy, MAZE_PIXEL_WIDTH, MAZE_PIXEL_HEIGHT))
         pygame.draw.rect(self.screen, (0, 0, 0), (ox, oy, MAZE_PIXEL_WIDTH, MAZE_PIXEL_HEIGHT))
@@ -251,7 +249,7 @@ class DashboardApp:
         for hx, hy in self.mouse.mapper.hits:
             pygame.draw.circle(self.screen, (255, 140, 140), self.world_to_px(ox, oy, hx, hy), 1)
         m = self.mouse                                            # where the robot BELIEVES it is
-        self.draw_mouse(ox, oy, (255, 60, 60) if m.run["crashed"] else COLOR_MEMORY_MOUSE,
+        self.draw_mouse(ox, oy, (255, 60, 60) if m.round_modes[m.current_round - 1] == "CRASH" else COLOR_MEMORY_MOUSE,
                         m.believed_pose(), m.believed_readings)
         self.screen.set_clip(None)
 
@@ -281,28 +279,18 @@ class DashboardApp:
             best = "not found yet"
         sp = len(self.absolute_shortest_path) - 1 if self.absolute_shortest_path else 0
         lt = len(self.least_turn_path) - 1 if self.least_turn_path else 0
-        match = self.match
-        crashes = sum(r["crashed"] for r in m.runs)
-        best_time = f"{match.best_time:.2f} s" if match.best_time else "-"
-        recent = "  ".join(f"{t:.2f}" for t in match.times[-4:]) or "-"
-        state = match.state.title()
-        if match.state == "HANDLING":
-            back = "Restarting" if m.run["returned"] else "Carrying back"
-            state = f"{back} ({match.handling_left:.1f} s)"
         rows = [
-            (f"Match: {int(match.time_left) // 60}:{int(match.time_left) % 60:02d} left   {state}",
-             (255, 200, 0) if match.state == "OVER" else COLOR_TEXT_METRIC),
-            (f"SCORE {match.score:,.0f}   = {len(match.times)} runs / {best_time} x 1000",
-             (120, 255, 120)),
-            (f"Runs: {len(match.times)} scored, {crashes} crashed   best {best_time}", COLOR_TEXT_METRIC),
-            (f"Last runs: {recent}", COLOR_TEXT_METRIC),
-            (f"This run: {m.run['mode']}  {m.run_clock:.2f} s  {m.run['cells']} cells"
-             + ("   driving home" if m.phase == "TO_START" else ""), COLOR_TEXT_METRIC),
+            (f"State: {m.state}", COLOR_TEXT_METRIC),
+            ("Cells: " + " | ".join(f"R{i + 1} {s}" for i, s in enumerate(m.round_steps)), COLOR_TEXT_METRIC),
+            ("Time: " + " | ".join(f"R{i + 1} {t:.1f}s" + (f" {md[0]}" if md else "")
+                                   for i, (t, md) in enumerate(zip(m.round_times, m.round_modes))), COLOR_TEXT_METRIC),
             (f"Velocity: {abs(m.v):.0f} cm/s = {abs(m.v) * 60 / (math.pi * WHEEL_DIAMETER_CM):.0f} rpm "
              f"({m.motion.replace('_', ' ').lower()})", COLOR_TEXT_METRIC),
             (f"Off-centre: {m.true_offset():+.1f} cm (thinks {m.est_offset:+.1f})   heading: "
              f"{math.degrees((m.body.theta - m.theta + math.pi) % (2 * math.pi) - math.pi):+.1f}°",
              (255, 120, 120) if abs(m.true_offset()) > 2 else COLOR_TEXT_METRIC),
+            ("Worst off-centre: " + " | ".join(f"R{i + 1} {o:.1f}" for i, o in enumerate(m.max_offset)) + " cm",
+             COLOR_TEXT_METRIC),
             (f"Mouse best: {best}", (255, 200, 0)),
             (f"Shortest: {sp} steps / {Maze.count_turns(self.absolute_shortest_path)} turns", COLOR_SOLUTION),
             (f"Least turns: {lt} steps / {Maze.count_turns(self.least_turn_path)} turns", COLOR_LEAST_TURN),
@@ -327,8 +315,11 @@ class DashboardApp:
         self.screen.blit(text_surf, text_surf.get_rect(center=self.regen_btn.center))
 
         pygame.draw.rect(self.screen, COLOR_BUTTON_HOVER if self.explore_btn.collidepoint(mouse_pos) else COLOR_BUTTON, self.explore_btn, border_radius=5)
-        btn_text = {"READY": "Start Match", "RUNNING": f"Run {len(self.mouse.runs)}...",
-                    "HANDLING": "Carrying back...", "OVER": "Match over"}[self.match.state]
+        btn_text = "Start Round 1"
+        if self.mouse.state == "EXPLORING": btn_text = f"Running R{self.mouse.current_round}..."
+        elif self.mouse.state == "ROUND_PAUSED":
+            btn_text = f"R{self.mouse.current_round + 1}: {self.mouse.next_round_mode().title()} Run"
+        elif self.mouse.state == "DONE": btn_text = "Complete"
         text_surf = self.font_btn.render(btn_text, True, (255, 255, 255))
         self.screen.blit(text_surf, text_surf.get_rect(center=self.explore_btn.center))
 
@@ -354,7 +345,10 @@ class DashboardApp:
         if self.regen_btn.collidepoint(pos):
             self._initialize_simulation()
         elif self.explore_btn.collidepoint(pos):
-            self.match.start()
+            if self.mouse.state == "IDLE":
+                self.mouse.state = "EXPLORING"
+            elif self.mouse.state == "ROUND_PAUSED":
+                self.mouse.start_next_round()
 
     def run(self):
         running = True
@@ -376,7 +370,7 @@ class DashboardApp:
             self.sim_accum = min(self.sim_accum + dt / 1000 * SIM_SPEEDS[self.speed_idx], 0.25)
             while self.sim_accum >= physics_dt:
                 self.sim_accum -= physics_dt
-                self.match.update(physics_dt)
+                self.mouse.update(self.physical_maze, physics_dt)
             solution_path = self.mouse.memory.get_shortest_path(*START_CELL)
 
             mouse_pos = pygame.mouse.get_pos()

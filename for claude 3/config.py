@@ -84,19 +84,6 @@ OBS_K_OFFSET = 0.3                      # observer gains, applied per side-wall 
 OBS_K_HEADING = 0.02                    # rad per cm of reading error
 OBS_K_CURVE = 0.0002                    # (rad/cm) per cm of reading error
 
-# The match, as MMRC26 runs it (rule 6.1): one 8-minute window, the clock never stops.
-# A run is timed from the front edge crossing the START line (leaving the start cell) to it
-# crossing the FINISH line (the goal entrance), so the run-up and the stop inside the goal are free.
-MATCH_TIME_S = 480.0
-HANDLING_TIME_S = 8.0                   # picking the mouse up at the goal and setting it down at the start
-AUTO_RESTART_S = 0.5                    # ... or, when it drove itself back, just the operator's go signal
-AUTO_RETURN = True                      # drive itself back to the start between runs (False = the
-                                        # operator carries it back, costing HANDLING_TIME_S)
-HOME_SPEED_CM_S = 45.0                  # the drive home is not timed, so take it easy: a crash there
-                                        # costs a rescue and the next run, and gains nothing
-RESCUE_TIME_S = 12.0                    # ... longer when it has crashed somewhere in the maze
-START_BACKOFF_CM = 2.8                  # how far back in the start cell it lines up, for a flying start
-
 # Simulation timing
 PHYSICS_HZ = 200                        # physics / control loop rate
 SIM_SPEEDS = [0.25, 0.5, 1, 2, 4, 8]    # playback multipliers (Up/Down arrows)
