@@ -53,10 +53,10 @@ DRIVEN_VOTE = 8                         # "I drove through it" is strong evidenc
 WALL_EVIDENCE_MAX = 10                  # votes saturate here so the map can still correct itself
 
 # Drive train: two wheels on the centre line of the body (so the mouse turns on the spot)
-WHEEL_DIAMETER_CM = 4.4
+WHEEL_DIAMETER_CM = 6.6
 MOTOR_MAX_RPM = 381                     # wheel rpm after the gearbox
 WHEEL_TRACK_CM = 7.0                    # distance between the two wheels (assumed - measure yours)
-MAX_SPEED_CM_S = math.pi * WHEEL_DIAMETER_CM * MOTOR_MAX_RPM / 60    # 44 mm wheels at 381 rpm: ≈ 87.8 cm/s
+MAX_SPEED_CM_S = math.pi * WHEEL_DIAMETER_CM * MOTOR_MAX_RPM / 60    # 66 mm wheels at 381 rpm: ≈ 131.7 cm/s
 ACCEL_CM_S2 = 200.0                     # max wheel acceleration (assumed - tune to your motors)
 SEARCH_SPEED_CM_S = MAX_SPEED_CM_S      # search at full motor speed (381 rpm) through mapped cells ...
 EXPLORE_SPEED_CM_S = 40.0               # ... but slow to this entering unexplored cells, so the sensors
@@ -76,8 +76,8 @@ def corner_speed(radius_cm):
     return min(motors, grip)
 
 
-# with 44 mm wheels: ~64 / 71 / 74 cm/s for radius 9.6 / 14.4 / 19.2 cm (the standard corner
-# pulls ~0.44 g sideways, close to MAX_SIDEWAYS_G)
+# with 66 mm wheels every corner is limited by grip, not the motors: ~69 / 84 / 97 cm/s for radius
+# 9.6 / 14.4 / 19.2 cm at MAX_SIDEWAYS_G
 
 
 CORNER_SPEED_CM_S = corner_speed(TURN_RADIUS_CM)
