@@ -4,7 +4,7 @@ import pygame
 import sys
 from config import *
 from maze import Maze, START_OPENING
-from match import Match
+from match import Match, KINDS
 from sensors import body_to_world
 
 # ---- Two-panel layout (derived from config so the grid size can change) ----
@@ -72,6 +72,8 @@ class DashboardApp:
 
         self.regen_btn = pygame.Rect(MAZES_CENTER_X - 190, CONTROLS_Y, 170, 44)
         self.explore_btn = pygame.Rect(MAZES_CENTER_X + 20, CONTROLS_Y, 170, 44)
+        self.kind_btn = pygame.Rect(MAZES_CENTER_X + 230, CONTROLS_Y, 190, 44)
+        self.match_kind = "MATCH"                      # "MATCH" (8 minutes) or "THREE_RUNS"
 
         self.speed_idx = SIM_SPEEDS.index(DEFAULT_SIM_SPEED)
         self.sim_accum = 0.0          # simulated seconds waiting to be stepped
@@ -87,7 +89,7 @@ class DashboardApp:
 
     def _initialize_simulation(self):
         self.physical_maze = Maze(is_blank_memory=False)
-        self.match = Match(self.physical_maze)
+        self.match = Match(self.physical_maze, self.match_kind)
         self.mouse = self.match.mouse
         self.absolute_shortest_path = self.physical_maze.get_shortest_path(*START_CELL)
         self.least_turn_path = self.physical_maze.get_least_turn_path(*START_CELL)
@@ -289,13 +291,28 @@ class DashboardApp:
         if match.state == "HANDLING":
             back = "Restarting" if m.run["returned"] else "Carrying back"
             state = f"{back} ({match.handling_left:.1f} s)"
-        rows = [
-            (f"Match: {int(match.time_left) // 60}:{int(match.time_left) % 60:02d} left   {state}",
-             (255, 200, 0) if match.state == "OVER" else COLOR_TEXT_METRIC),
-            (f"SCORE {match.score:,.0f}   = {len(match.times)} runs / {best_time} x 1000",
-             (120, 255, 120)),
-            (f"Runs: {len(match.times)} scored, {crashes} crashed   best {best_time}", COLOR_TEXT_METRIC),
-            (f"Last runs: {recent}", COLOR_TEXT_METRIC),
+        if match.kind == "THREE_RUNS":
+            state = {"READY": "press Start", "WAITING": "press Start for the next run",
+                     "RUNNING": "running", "OVER": "all 3 runs done"}.get(match.state, state)
+            per_run = [(f"{r['time']:.2f}s" if r["time"] is not None else "crash" if r["crashed"] else "-")
+                       + f" {r['mode'][0]}" for r in m.runs]
+            per_run += ["-"] * (3 - len(per_run))
+            header = [
+                (f"3 runs: run {max(1, len(m.runs))} of 3   {state}",
+                 (255, 200, 0) if match.state == "OVER" else COLOR_TEXT_METRIC),
+                ("Times: " + " | ".join(f"R{i + 1} {t}" for i, t in enumerate(per_run)), COLOR_TEXT_METRIC),
+                (f"Best {best_time}   score {match.score:,.0f} (runs / best x 1000)", (120, 255, 120)),
+            ]
+        else:
+            header = [
+                (f"Match: {int(match.time_left) // 60}:{int(match.time_left) % 60:02d} left   {state}",
+                 (255, 200, 0) if match.state == "OVER" else COLOR_TEXT_METRIC),
+                (f"SCORE {match.score:,.0f}   = {len(match.times)} runs / {best_time} x 1000",
+                 (120, 255, 120)),
+                (f"Runs: {len(match.times)} scored, {crashes} crashed   best {best_time}", COLOR_TEXT_METRIC),
+                (f"Last runs: {recent}", COLOR_TEXT_METRIC),
+            ]
+        rows = header + [
             (f"This run: {m.run['mode']}  {m.run_clock:.2f} s  {m.run['cells']} cells"
              + ("   driving home" if m.phase == "TO_START" else ""), COLOR_TEXT_METRIC),
             (f"Velocity: {abs(m.v):.0f} cm/s = {abs(m.v) * 60 / (math.pi * WHEEL_DIAMETER_CM):.0f} rpm "
@@ -327,10 +344,22 @@ class DashboardApp:
         self.screen.blit(text_surf, text_surf.get_rect(center=self.regen_btn.center))
 
         pygame.draw.rect(self.screen, COLOR_BUTTON_HOVER if self.explore_btn.collidepoint(mouse_pos) else COLOR_BUTTON, self.explore_btn, border_radius=5)
-        btn_text = {"READY": "Start Match", "RUNNING": f"Run {len(self.mouse.runs)}...",
-                    "HANDLING": "Carrying back...", "OVER": "Match over"}[self.match.state]
+        n = len(self.mouse.runs)
+        if self.match.kind == "THREE_RUNS":
+            nxt = self.mouse.next_run_mode(last_chance=(n == 2)).title()
+            btn_text = {"READY": "Start Run 1", "WAITING": f"Run {n + 1}: {nxt}", "RUNNING": f"Run {n}...",
+                        "OVER": "3 runs done"}[self.match.state]
+        else:
+            btn_text = {"READY": "Start Match", "RUNNING": f"Run {n}...",
+                        "HANDLING": "Carrying back...", "OVER": "Match over"}[self.match.state]
         text_surf = self.font_btn.render(btn_text, True, (255, 255, 255))
         self.screen.blit(text_surf, text_surf.get_rect(center=self.explore_btn.center))
+
+        # which kind of run-through: click to switch (restarts on the same maze)
+        pygame.draw.rect(self.screen, COLOR_BUTTON_HOVER if self.kind_btn.collidepoint(mouse_pos) else (90, 60, 160),
+                         self.kind_btn, border_radius=5)
+        text_surf = self.font_btn.render(f"Mode: {KINDS[self.match_kind]}", True, (255, 255, 255))
+        self.screen.blit(text_surf, text_surf.get_rect(center=self.kind_btn.center))
 
         if self.toggles["trail"]:                          # colour key for the speed path
             x0, y0, w = PANEL_1_X, CONTROLS_Y + 8, 150
@@ -355,6 +384,10 @@ class DashboardApp:
             self._initialize_simulation()
         elif self.explore_btn.collidepoint(pos):
             self.match.start()
+        elif self.kind_btn.collidepoint(pos):
+            self.match_kind = "THREE_RUNS" if self.match_kind == "MATCH" else "MATCH"
+            self.match = Match(self.physical_maze, self.match_kind)     # same maze, fresh mouse
+            self.mouse = self.match.mouse
 
     def run(self):
         running = True

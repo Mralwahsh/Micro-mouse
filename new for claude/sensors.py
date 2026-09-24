@@ -4,7 +4,7 @@ import random
 from dataclasses import dataclass
 import numpy as np
 from config import (COLS, ROWS, CELL_SIZE_CM, WALL_THICKNESS_CM, SENSORS,
-                    TOF_NOISE_CM, TOF_NOISE_FRAC, IR_NOISE_CM, SENSOR_DROPOUT)
+                    MIN_NOISE_CM, SENSOR_DROPOUT)
 
 HALF_WALL = WALL_THICKNESS_CM / 2
 
@@ -21,6 +21,12 @@ class Reading:
     direction: tuple               # unit vector of the beam
     distance: float | None         # measured (noisy) distance, None = nothing within range
     end: tuple                     # measured hit point, or the max-range point
+
+
+def noise_sigma(s, distance):
+    """1-sigma error of a reading. Accuracy is quoted as the +/- band that 95 % (2 sigma) of
+    readings fall in, as a fraction of the distance: 85 % accurate -> +/-15 % -> sigma 7.5 %."""
+    return max(MIN_NOISE_CM, (1 - s["accuracy"]) / 2 * distance)
 
 
 def body_to_world(px, py, theta, bx, by):
@@ -93,7 +99,8 @@ class SensorArray:
         return None if hit is None else hit[0]
 
     def first_hit(self, ox, oy, dx, dy, max_range):
-        """(distance, kind) of the first surface along the beam, or None if nothing is in range."""
+        """(distance, kind, axis) of the first surface along the beam, or None if nothing is in range.
+        axis is 'x' when the beam hit a face whose normal is along x (a vertical face), else 'y'."""
         b = self.boxes
         near, far = [], []
         for o, d, lo, hi in ((ox, dx, b[:, 0], b[:, 2]), (oy, dy, b[:, 1], b[:, 3])):
@@ -112,18 +119,17 @@ class SensorArray:
             return None
         t = np.where(hits, t_near, np.inf)
         i = int(np.argmin(t))
-        return float(max(0.0, t[i])), self.kinds[i]
+        return float(max(0.0, t[i])), self.kinds[i], ('x' if near[0][i] >= near[1][i] else 'y')
 
-    def scan(self, px, py, theta, rng=random):
-        """Read every sensor from the pose (px, py, theta). Distances carry sensor noise."""
+    def scan(self, px, py, theta, which=SENSORS, rng=random):
+        """Read the sensors in `which` from the pose (px, py, theta). Distances carry sensor noise."""
         readings = []
-        for s in SENSORS:
+        for s in which:
             ox, oy, dx, dy = beam(px, py, theta, s)
 
             dist = self.true_distance(ox, oy, dx, dy, s["range"])
             if dist is not None:
-                sigma = IR_NOISE_CM if s["kind"] == "IR" else TOF_NOISE_CM + TOF_NOISE_FRAC * dist
-                dist = max(0.0, dist + rng.gauss(0.0, sigma))
+                dist = max(0.0, dist + rng.gauss(0.0, noise_sigma(s, dist)))
                 if dist > s["range"] or rng.random() < SENSOR_DROPOUT:
                     dist = None
             reach = dist if dist is not None else s["range"]

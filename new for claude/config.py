@@ -15,25 +15,32 @@ MOUSE_WIDTH_CM = 8.0                        # side to side
 MOUSE_LENGTH_CM = 10.0                      # front to back (along the heading)
 PX_PER_CM = CELL_SIZE / CELL_INSIDE_CM      # rendering scale ≈ 2.778 px/cm
 
+# Sensor behaviour, as the real parts are (the firmware only ever gets a noisy distance)
+TOF_MEASURE_S = 0.025                   # a TOF needs 25 ms per reading -> 40 readings a second. The value
+                                        # is an average over those 25 ms, so it describes where the mouse
+                                        # was ~12.5 ms before it arrives
+IR_MEASURE_S = 0.005                    # the analog side IRs are fast: sampled every 5 ms
+TOF_ACCURACY = 0.85                     # a TOF reads within +/-15 % of the true distance (95 % of readings)
+IR_ACCURACY = 0.95                      # an IR reads within +/-5 %
+MIN_NOISE_CM = 0.1                      # the noise never gets smaller than this, however close
+SENSOR_DROPOUT = 0.005                  # chance a reading comes back as "out of range" anyway
+
 # Sensor layout, in the mouse body frame (cm, origin = body centre):
 #   x = to the right of centre, y = forward of centre,
-#   angle = degrees from straight ahead (positive = towards the right), range = max reach.
+#   angle = degrees from straight ahead (positive = towards the right), range = max reach,
+#   period = time between readings, latency = how old the pose a reading describes is.
 # The two angled TOFs sit at the rear corners and look diagonally ACROSS the body,
 # so their beams cross at the centre (rear-left looks front-right and vice versa).
+_IR = {"kind": "IR", "range": 3.5, "accuracy": IR_ACCURACY, "period": IR_MEASURE_S, "latency": 0.0}
+_TOF = {"kind": "TOF", "range": 80.0, "accuracy": TOF_ACCURACY, "period": TOF_MEASURE_S,
+        "latency": TOF_MEASURE_S / 2}
 SENSORS = [
-    {"name": "Left IR",         "short": "L-IR", "kind": "IR",  "x": -3.5, "y":  0.5, "angle": -90, "range": 2.5},
-    {"name": "Right IR",        "short": "R-IR", "kind": "IR",  "x":  3.5, "y":  0.5, "angle":  90, "range": 2.5},
-    {"name": "Front TOF",       "short": "F",    "kind": "TOF", "x":  0.0, "y": -4.2, "angle":   0, "range": 80.0},
-    {"name": "Front-Right TOF", "short": "FR",   "kind": "TOF", "x": -3.0, "y": -3.5, "angle":  45, "range": 80.0},
-    {"name": "Front-Left TOF",  "short": "FL",   "kind": "TOF", "x":  3.0, "y": -3.5, "angle": -45, "range": 80.0},
+    {"name": "Left IR",         "short": "L-IR", "x": -3.5, "y":  0.5, "angle": -90, **_IR},
+    {"name": "Right IR",        "short": "R-IR", "x":  3.5, "y":  0.5, "angle":  90, **_IR},
+    {"name": "Front TOF",       "short": "F",    "x":  0.0, "y": -4.2, "angle":   0, **_TOF},
+    {"name": "Front-Right TOF", "short": "FR",   "x": -3.0, "y": -3.5, "angle":  45, **_TOF},
+    {"name": "Front-Left TOF",  "short": "FL",   "x":  3.0, "y": -3.5, "angle": -45, **_TOF},
 ]
-
-# Sensor behaviour: sampling rate and noise (distance readings only - no ground truth leaks out)
-SENSOR_HZ = 50                          # how often all sensors are read
-TOF_NOISE_CM = 0.5                      # TOF std-dev = TOF_NOISE_CM + TOF_NOISE_FRAC * distance
-TOF_NOISE_FRAC = 0.015
-IR_NOISE_CM = 0.1
-SENSOR_DROPOUT = 0.005                  # chance a reading comes back as "out of range" anyway
 
 # Mapping: walls are decided by accumulated evidence, not a single reading
 WALL_EVIDENCE_THRESHOLD = 3             # net votes needed before an edge counts as a known WALL
@@ -57,7 +64,28 @@ EXPLORE_SPEED_CM_S = 40.0               # ... but slow to this entering unexplor
 # runs (1 + track / 2r) times faster than the mouse, so with 381 rpm motors the limit is ~50 cm/s.
 TURN_RADIUS_CM = 9.6                    # = CELL_SIZE_CM / 2
 # fastest corner the motors allow: the OUTER wheel at 381 rpm (~49.7 cm/s, 0.26 g sideways)
-CORNER_SPEED_CM_S = MAX_SPEED_CM_S / (1 + WHEEL_TRACK_CM / (2 * TURN_RADIUS_CM))
+
+
+def corner_speed(radius_cm):
+    """Top speed on an arc of this radius: the outer wheel runs (1 + track / 2r) times faster."""
+    return MAX_SPEED_CM_S / (1 + WHEEL_TRACK_CM / (2 * radius_cm))
+
+
+CORNER_SPEED_CM_S = corner_speed(TURN_RADIUS_CM)
+# Fast runs only (the route is known): faster geometry where the route allows it
+BIG_CORNERS = True                      # a corner with straights on both sides is swept wider ...
+BIG_TURN_RADIUS_CM = 14.4               # ... -> ~54.5 cm/s; the inner post still clears the body by 2.8 cm
+DIAGONALS = True                        # staircases (corners alternating left/right) are cut with a
+                                        # 45-degree diagonal through the middles of the cell edges
+DIAG_TURN_RADIUS_CM = 19.2              # the 45-degree curves onto / off the diagonal (~57 cm/s)
+DIAG_HERO_ONLY = 1                      # 1: use diagonals only until ONE diagonal run succeeds - that
+                                        # sets the best time - then race without them (fewer crashes)
+DIAG_SPEED_CM_S = 60.0                  # on the diagonal: the posts pass only ~1.9 cm from the body
+DIAG_KP = 1.2                           # steering back onto the diagonal line (rad/s per cm) ...
+DIAG_KH = 14.0                          # ... and onto its direction (rad/s per rad)
+DIAG_POS_GAIN = 0.3                     # position fix per wall / post reading while on the diagonal
+DIAG_HEAD_GAIN = 0.02                   # ... and heading fix per cm of sideways position fix (rad/cm)
+DIAG_USE_CURVE = 1                      # apply the learned wheel-mismatch curve on the diagonal (1/0)
 SEARCH_TURN_SPEED_CM_S = CORNER_SPEED_CM_S
 FAST_TURN_SPEED_CM_S = CORNER_SPEED_CM_S
 MOTOR_LAG_COMP_S = 0.03                 # firmware: measured motor response time; corners start/end this early
@@ -73,7 +101,6 @@ WHEEL_SLIP_NOISE = 0.03                 # random slip on each wheel, every physi
 START_POS_ERROR_CM = 0.5                # hand-placement error at the start
 START_ANGLE_ERROR_DEG = 2.0
 MOTOR_TAU_S = 0.03                      # motors reach ~63% of a new speed command after this long
-SENSOR_LATENCY_S = 0.02                 # a TOF reading describes where the body was this long ago
 
 # Centering (firmware, encoders only - no IMU): an observer estimates offset, heading error and
 # the robot's own wheel-mismatch curve from the steering it commands + the side-wall distances
@@ -90,8 +117,8 @@ OBS_K_CURVE = 0.0002                    # (rad/cm) per cm of reading error
 MATCH_TIME_S = 480.0
 HANDLING_TIME_S = 8.0                   # picking the mouse up at the goal and setting it down at the start
 AUTO_RESTART_S = 0.5                    # ... or, when it drove itself back, just the operator's go signal
-AUTO_RETURN = True                      # drive itself back to the start between runs (False = the
-                                        # operator carries it back, costing HANDLING_TIME_S)
+AUTO_RETURN = False                     # True: it drives itself back to the start between runs
+                                        # (False: the operator carries it back, costing HANDLING_TIME_S)
 HOME_SPEED_CM_S = 45.0                  # the drive home is not timed, so take it easy: a crash there
                                         # costs a rescue and the next run, and gains nothing
 RESCUE_TIME_S = 12.0                    # ... longer when it has crashed somewhere in the maze

@@ -1,8 +1,8 @@
 # mapper.py
 import math
 from collections import deque
+from sensors import noise_sigma
 from config import (COLS, ROWS, CELL_SIZE_CM, WALL_THICKNESS_CM, DIRECTIONS, OPPOSITE,
-                    TOF_NOISE_CM, TOF_NOISE_FRAC, IR_NOISE_CM,
                     WALL_EVIDENCE_THRESHOLD, OPEN_EVIDENCE_THRESHOLD, WALL_EVIDENCE_MAX, DRIVEN_VOTE)
 
 HALF_WALL = WALL_THICKNESS_CM / 2
@@ -99,7 +99,7 @@ class Mapper:
         if r.distance is not None and r.distance > rng:
             r = type(r)(r.sensor, r.origin, r.direction, None, r.end)   # too far to trust: free space only
         if r.distance is not None:
-            sigma = IR_NOISE_CM if r.sensor["kind"] == "IR" else TOF_NOISE_CM + TOF_NOISE_FRAC * r.distance
+            sigma = noise_sigma(r.sensor, r.distance)
             free_len = r.distance - HIT_TOLERANCE - 3 * sigma
         else:
             free_len = rng - HIT_TOLERANCE

@@ -5,7 +5,7 @@ The firmware (micromouse.py) commands a forward speed and a turn rate and only
 learns what happened from its wheel encoders. This class is what really
 happens: the motors take MOTOR_TAU_S to follow a command, the wheels are
 slightly different sizes and they slip, and the TOF sensors report where the
-body was SENSOR_LATENCY_S ago - so the true pose weaves and wanders away from
+body was a moment ago (each sensor's latency) - so the true pose weaves and wanders away from
 where the mouse believes it is.
 """
 import math
@@ -14,7 +14,7 @@ from collections import deque
 import numpy as np
 from sensors import body_to_world
 from config import (WHEEL_TRACK_CM, WHEEL_SLIP_NOISE, MOUSE_WIDTH_CM, MOUSE_LENGTH_CM,
-                    MOTOR_TAU_S, SENSOR_LATENCY_S, PHYSICS_HZ)
+                    MOTOR_TAU_S, SENSORS, PHYSICS_HZ)
 
 HW, HL = MOUSE_WIDTH_CM / 2, MOUSE_LENGTH_CM / 2
 OUTLINE = [(-HW, HL), (0, HL), (HW, HL), (HW, 0), (HW, -HL), (0, -HL), (-HW, -HL), (-HW, 0)]
@@ -26,7 +26,7 @@ class RobotBody:
         self.gain_l, self.gain_r = wheel_gain             # real / assumed wheel diameter
         self.wl = self.wr = 0.0                           # wheel speeds as the encoders count them, cm/s
         self.rng = rng
-        self.history = deque(maxlen=max(1, round(SENSOR_LATENCY_S * PHYSICS_HZ)) + 1)
+        self.history = deque(maxlen=round(max(s["latency"] for s in SENSORS) * PHYSICS_HZ) + 1)
         self.history.append((px, py, theta))
 
     def step(self, v, omega, dt):
@@ -48,9 +48,9 @@ class RobotBody:
         self.history.append((self.px, self.py, self.theta))
         return (self.wl + self.wr) / 2 * dt, (self.wl - self.wr) / WHEEL_TRACK_CM * dt
 
-    def sensed_pose(self):
-        """Where the body was when the current sensor readings were actually taken."""
-        return self.history[0]
+    def pose_ago(self, seconds):
+        """Where the body was `seconds` ago - what a sensor with that latency is describing."""
+        return self.history[max(0, len(self.history) - 1 - round(seconds * PHYSICS_HZ))]
 
     def crashed(self, sensor_array):
         """True if any point of the body outline is inside a wall or post."""
