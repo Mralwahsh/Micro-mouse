@@ -6,9 +6,7 @@ from config import (COLS, ROWS, CELL_SIZE_CM, WALL_THICKNESS_CM, DIRECTIONS, OPP
                     WALL_EVIDENCE_THRESHOLD, OPEN_EVIDENCE_THRESHOLD, WALL_EVIDENCE_MAX, DRIVEN_VOTE)
 
 HALF_WALL = WALL_THICKNESS_CM / 2
-POST_MARGIN = HALF_WALL + 1.5      # readings this close to a post are ambiguous and ignored ...
-POST_MARGIN_PER_CM = 0.05          # ... plus this much per cm of beam: a few degrees of heading error
-                                   # move a far hit along the wall, off the post onto the slot beside it
+POST_MARGIN = HALF_WALL + 1.5      # readings this close to a post are ambiguous and ignored
 HIT_TOLERANCE = HALF_WALL + 1.0    # extra free-space margin kept short of every hit
 DROPOUT_GUARD_CM = 10.0            # "nothing in range" right after a hit this far inside range = dropout
 MAP_RANGE_CM = 45.0                # only trust this much of a beam: the pose estimate is never perfect
@@ -127,8 +125,7 @@ class Mapper:
                 along = p + pd * t                                  # position along the slot
                 idx = math.floor(along / CELL_SIZE_CM)
                 local = along - idx * CELL_SIZE_CM
-                margin = POST_MARGIN + POST_MARGIN_PER_CM * t
-                if margin < local < CELL_SIZE_CM - margin:
+                if POST_MARGIN < local < CELL_SIZE_CM - POST_MARGIN:
                     key = ('V', line, idx) if kind == 'V' else ('H', idx, line)
                     changed |= self._vote(key, -1)
 
@@ -149,8 +146,7 @@ class Mapper:
                 along = p + pd * t
                 idx = math.floor(along / CELL_SIZE_CM)
                 local = along - idx * CELL_SIZE_CM
-                margin = POST_MARGIN + POST_MARGIN_PER_CM * t
-                if margin < local < CELL_SIZE_CM - margin:
+                if POST_MARGIN < local < CELL_SIZE_CM - POST_MARGIN:
                     fits.append(('V', line, idx) if kind == 'V' else ('H', idx, line))
                 else:
                     fits.append(None)

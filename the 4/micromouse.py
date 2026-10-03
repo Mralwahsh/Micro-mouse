@@ -62,7 +62,7 @@ class Micromouse:
 
     Every physics tick (PHYSICS_HZ) the mouse:
 
-      1. SENSE  - reads its 5 TOF sensors every 25 ms (side, diagonal and front, see
+      1. SENSE  - reads its 5 sensors (2 side IR every 5 ms, 3 TOF every 25 ms, see
                   config.SENSORS). Each gives only a noisy distance. The Mapper
                   turns those distances into wall / open evidence per edge;
                   an edge enters the map only after enough agreeing readings.
@@ -81,8 +81,8 @@ class Micromouse:
     no IMU). The real body (`self.body`, simulation only) drifts away from that.
     To stay centred the firmware runs a small observer that estimates its offset
     from the centre line, its heading error and its own wheel-mismatch curve,
-    from the steering it commands plus the side-wall distances (side and
-    diagonal TOFs). It steers on those estimates, so it keeps going straight
+    from the steering it commands plus the side-wall distances (diagonal TOFs +
+    short IR guard). It steers on those estimates, so it keeps going straight
     where there are no walls too. It re-centres along the cell from the front
     wall whenever it stops facing one. Touching a wall = crash.
 
@@ -90,7 +90,7 @@ class Micromouse:
     carried back to the start by hand; the map carries over. Each round is one of:
       * SEARCH - flood fill at SEARCH_SPEED_CM_S, mapping as it goes;
       * FAST   - no exploring: follow the quickest route through confirmed-open
-                 edges at full motor speed (MAX_SPEED_CM_S = 400 rpm wheels).
+                 edges at full motor speed (MAX_SPEED_CM_S = 381 rpm wheels).
     A round is FAST once the map proves the best route (`solved_optimally`:
     confirmed route as short as the optimistic lower bound), and the last
     round is always FAST - that is the run that counts.
@@ -215,7 +215,7 @@ class Micromouse:
 
     def _fit_start_pose(self):
         """Fit offset + heading to the start-cell readings (least squares, dropping outliers).
-        Readings at different distances ahead (side TOFs ~1 cm, diagonal TOFs ~9 cm) separate
+        Readings at different distances ahead (side IR ~0.5 cm, diagonal TOFs ~8 cm) separate
         being off-centre from being crooked, like two points on a line."""
         hits = self.start_hits
         off, head = 0.0, 0.0
@@ -420,7 +420,7 @@ class Micromouse:
                 self.front_samples.append(front.distance)
 
     # --------------------------------------------------------------- centering
-    def _observe_walls(self, readings):
+    def _observe_walls(self, readings, gate_scale=1.0):
         """Correct the pose estimate with every reading the mouse's own map can explain.
 
         Each TOF distance is compared with what it SHOULD read, ray-cast from the believed pose
@@ -430,10 +430,7 @@ class Micromouse:
           * hit a wall across the lane (e.g. the front wall) -> the difference is how far
             along the lane the mouse really is;
           * hit a post, nothing known, or far off the prediction -> not trusted, skipped.
-        A sensor looking straight out to the side reads the wall (or post) line beside the body,
-        known yet or not, so it is used directly; through an opening it reads far, and the gate drops it.
-        The gate is wide (6 cm) on purpose: after corners the estimate can be several cm off, and
-        a tight gate (2 cm) would stop the side walls from pulling it back (3x the crashes).
+        The short-range IR can only see something right beside the body, so it is used directly.
         """
         if self.known_view is None:
             self.known_view = SensorArray(self.memory, known_only=True)
@@ -443,11 +440,11 @@ class Micromouse:
             s = r.sensor
             if r.distance is None:
                 continue
-            sin_a = math.sin(math.radians(s["angle"]))
-            if abs(sin_a) > 0.99:
+            if s["kind"] == "IR":
+                sin_a = math.sin(math.radians(s["angle"]))
                 side = 1 if sin_a > 0 else -1
                 z = side * (WALL_FACE - side * s["x"] - r.distance * abs(sin_a))
-                self._correct_sideways(z - (self.est_offset + s["y"] * self.est_heading), 6.0)
+                self._correct_sideways(z - (self.est_offset + s["y"] * self.est_heading), 6.0 * gate_scale)
                 continue
             if r.distance > MAP_TRUST_CM:
                 continue
@@ -457,12 +454,12 @@ class Micromouse:
                 continue
             t_pred, kind, _ = hit
             innovation = r.distance - t_pred              # + = the wall is further than expected
-            if abs(innovation) > 3.0:
+            if abs(innovation) > 3.0 * gate_scale:
                 continue
             if (kind == 'V') == (fx == 0):                # a wall running along the lane
                 u_side = dx * rx + dy * ry                # beam's sideways component (+ = right)
                 if abs(u_side) > 0.5:
-                    self._correct_sideways(-innovation * u_side, 3.0)
+                    self._correct_sideways(-innovation * u_side, 3.0 * gate_scale)
             else:                                         # a wall across the lane
                 u_fwd = dx * fx + dy * fy
                 if abs(u_fwd) > 0.5:
@@ -512,7 +509,7 @@ class Micromouse:
     # ------------------------------------------------------------------ motion
     def _plan_at_center(self):
         if not self.aligned:
-            # set down by hand somewhere in the start cell: let the side and diagonal TOFs
+            # set down by hand somewhere in the start cell: let the side IRs and diagonal TOFs
             # measure the offset and heading against the three start walls before moving
             self.align_clock += 1.0 / PHYSICS_HZ
             if self.align_clock < ALIGN_TIME_S:
@@ -652,7 +649,7 @@ class Micromouse:
         return min(corner, self._speed_limit())
 
     def _speed_limit(self):
-        """Full motor speed (400 rpm) on fast runs and through cells already mapped; slower only
+        """Full motor speed (381 rpm) on fast runs and through cells already mapped; slower only
         when heading into a cell whose walls are not all confirmed yet."""
         if self.phase == "TO_START":
             return HOME_SPEED_CM_S

@@ -12,14 +12,16 @@ CELL_INSIDE_CM = 18.0                       # MMRC26: a cell is 18 x 18 cm measu
 WALL_THICKNESS_CM = 1.2
 CELL_SIZE_CM = CELL_INSIDE_CM + WALL_THICKNESS_CM   # post-to-post pitch (19.2 cm) - what the geometry uses
 MOUSE_WIDTH_CM = 7.0                        # side to side
-MOUSE_LENGTH_CM = 7.0                       # front to back (along the heading)
+MOUSE_LENGTH_CM = 10.0                      # front to back (along the heading)
 PX_PER_CM = CELL_SIZE / CELL_INSIDE_CM      # rendering scale ≈ 2.778 px/cm
 
 # Sensor behaviour, as the real parts are (the firmware only ever gets a noisy distance)
 TOF_MEASURE_S = 0.025                   # a TOF needs 25 ms per reading -> 40 readings a second. The value
                                         # is an average over those 25 ms, so it describes where the mouse
                                         # was ~12.5 ms before it arrives
+IR_MEASURE_S = 0.005                    # the analog side IRs are fast: sampled every 5 ms
 TOF_ACCURACY = 0.85                     # a TOF reads within +/-15 % of the true distance (95 % of readings)
+IR_ACCURACY = 0.95                      # an IR reads within +/-5 %
 MIN_NOISE_CM = 0.1                      # the noise never gets smaller than this, however close
 SENSOR_DROPOUT = 0.005                  # chance a reading comes back as "out of range" anyway
 
@@ -27,17 +29,19 @@ SENSOR_DROPOUT = 0.005                  # chance a reading comes back as "out of
 #   x = to the right of centre, y = forward of centre,
 #   angle = degrees from straight ahead (positive = towards the right), range = max reach,
 #   period = time between readings, latency = how old the pose a reading describes is.
-# Five TOFs, no IR, all in the front half of the body and 1 cm in from its edges: one looking
-# straight ahead, two at the front corners looking 45 degrees out, two looking straight out to the
-# sides (2.5 cm behind the front edge). Centred in a lane the side TOFs read 6.5 cm to the walls.
+# The two angled TOFs sit at the rear corners and look diagonally ACROSS the body,
+# so their beams cross at the centre (rear-left looks front-right and vice versa).
+# side IR range 6.5 cm (upgraded from 3.5): the side wall is 5.5 cm from each IR when the mouse is
+# centred, so above 5.5 cm the IRs see both side walls all the time - crashes drop to ~0
+_IR = {"kind": "IR", "range": 6.5, "accuracy": IR_ACCURACY, "period": IR_MEASURE_S, "latency": 0.0}
 _TOF = {"kind": "TOF", "range": 80.0, "accuracy": TOF_ACCURACY, "period": TOF_MEASURE_S,
         "latency": TOF_MEASURE_S / 2}
 SENSORS = [
-    {"name": "Left TOF",        "short": "L",    "x": -2.5, "y":  1.0, "angle": -90, **_TOF},
-    {"name": "Front-Left TOF",  "short": "FL",   "x": -2.5, "y":  2.5, "angle": -45, **_TOF},
-    {"name": "Front TOF",       "short": "F",    "x":  0.0, "y":  2.5, "angle":   0, **_TOF},
-    {"name": "Front-Right TOF", "short": "FR",   "x":  2.5, "y":  2.5, "angle":  45, **_TOF},
-    {"name": "Right TOF",       "short": "R",    "x":  2.5, "y":  1.0, "angle":  90, **_TOF},
+    {"name": "Left IR",         "short": "L-IR", "x": -3.5, "y":  0.5, "angle": -90, **_IR},
+    {"name": "Right IR",        "short": "R-IR", "x":  3.5, "y":  0.5, "angle":  90, **_IR},
+    {"name": "Front TOF",       "short": "F",    "x":  0.0, "y": -4.2, "angle":   0, **_TOF},
+    {"name": "Front-Right TOF", "short": "FR",   "x": -3.0, "y": -3.5, "angle":  45, **_TOF},
+    {"name": "Front-Left TOF",  "short": "FL",   "x":  3.0, "y": -3.5, "angle": -45, **_TOF},
 ]
 
 # Mapping: walls are decided by accumulated evidence, not a single reading
@@ -49,17 +53,17 @@ DRIVEN_VOTE = 8                         # "I drove through it" is strong evidenc
 WALL_EVIDENCE_MAX = 10                  # votes saturate here so the map can still correct itself
 
 # Drive train: two wheels on the centre line of the body (so the mouse turns on the spot)
-WHEEL_DIAMETER_CM = 3.4
-MOTOR_MAX_RPM = 400                     # wheel rpm after the gearbox
+WHEEL_DIAMETER_CM = 4.4
+MOTOR_MAX_RPM = 381                     # wheel rpm after the gearbox
 WHEEL_TRACK_CM = 7.0                    # distance between the two wheels (assumed - measure yours)
-MAX_SPEED_CM_S = math.pi * WHEEL_DIAMETER_CM * MOTOR_MAX_RPM / 60    # 34 mm wheels at 400 rpm: ≈ 71.2 cm/s
+MAX_SPEED_CM_S = math.pi * WHEEL_DIAMETER_CM * MOTOR_MAX_RPM / 60    # 44 mm wheels at 381 rpm: ≈ 87.8 cm/s
 ACCEL_CM_S2 = 200.0                     # max wheel acceleration (assumed - tune to your motors)
-SEARCH_SPEED_CM_S = MAX_SPEED_CM_S      # search at full motor speed (400 rpm) through mapped cells ...
+SEARCH_SPEED_CM_S = MAX_SPEED_CM_S      # search at full motor speed (381 rpm) through mapped cells ...
 EXPLORE_SPEED_CM_S = 40.0               # ... but slow to this entering unexplored cells, so the sensors
                                         # can confirm the walls before the mouse must commit to a move
 # Smooth 90-degree turns: a quarter circle through the corner cell, from the middle of the edge
 # it enters by to the middle of the edge it leaves by (radius = half a cell). The outer wheel
-# runs (1 + track / 2r) times faster than the mouse, so with 400 rpm motors the limit is ~52 cm/s.
+# runs (1 + track / 2r) times faster than the mouse, so with 381 rpm motors the limit is ~50 cm/s.
 TURN_RADIUS_CM = 9.6                    # = CELL_SIZE_CM / 2
 MAX_SIDEWAYS_G = 0.5                    # tyre grip on painted plywood (rule 5.b: "may be quite slick")
 
@@ -72,8 +76,8 @@ def corner_speed(radius_cm):
     return min(motors, grip)
 
 
-# with 34 mm wheels at 400 rpm: ~52 / 57 / 60 cm/s for radius 9.6 / 14.4 / 19.2 cm (all limited
-# by the outer wheel's rpm, not by grip: the standard corner pulls ~0.29 g sideways)
+# with 44 mm wheels: ~64 / 71 / 74 cm/s for radius 9.6 / 14.4 / 19.2 cm (the standard corner
+# pulls ~0.44 g sideways, close to MAX_SIDEWAYS_G)
 
 
 CORNER_SPEED_CM_S = corner_speed(TURN_RADIUS_CM)
@@ -105,12 +109,12 @@ WHEEL_MISMATCH = 0.005                  # std-dev of each wheel's real/assumed d
 WHEEL_SLIP_NOISE = 0.03                 # random slip on each wheel, every physics tick
 START_SPOT_SIDE_CM = 4.0                # the operator sets it down anywhere in the start cell: up to
 START_SPOT_ALONG_CM = 3.0               # this far to either side / forward or back of the centre (it
-START_ANGLE_ERROR_DEG = 8.0             # must still fit), and this crooked
+START_ANGLE_ERROR_DEG = 8.0             # must still fit: 5 cm / 4 cm is the limit), and this crooked
 MOTOR_TAU_S = 0.03                      # motors reach ~63% of a new speed command after this long
 
 # Centering (firmware, encoders only - no IMU): an observer estimates offset, heading error and
 # the robot's own wheel-mismatch curve from the steering it commands + the side-wall distances
-CENTER_KP = 1.2                         # rad/s of steering per cm off-centre
+CENTER_KP = 1.2                         # rad/s of steering per cm off-centre (tuned for 381 rpm straights)
 CENTER_KH = 14.0                        # rad/s of steering per rad of heading error
 MAX_STEER_RAD_S = 2.0
 OBS_K_OFFSET = 0.3                      # observer gains, applied per side-wall reading
